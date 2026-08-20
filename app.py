@@ -2,13 +2,16 @@ import streamlit as st
 from datetime import datetime
 
 from ia_engine import classificar_chamado, conversar_coleta
+import sla
 from database import (
-    salvar_chamado, criar_tabela, atualizar_tabela, criar_tabela_mensagens,
-    listar_chamados, buscar_chamado_por_id, atualizar_status_chamado,
-    atribuir_chamado, listar_mensagens_chamado, enviar_mensagem_chamado,
-    listar_usuarios, criar_usuario, buscar_usuario_por_email, atualizar_senha,
-    salvar_totp_secret, salvar_codigo_verificacao, verificar_codigo,
-    buscar_usuario_por_id, atualizar_usuario, excluir_usuario,
+    salvar_chamado, criar_tabela_usuarios, migrar_tabela_usuarios,
+    criar_tabela_chamados, migrar_tabela_chamados, criar_tabela_mensagens,
+    criar_tabela_codigos, listar_chamados, buscar_chamado_por_id,
+    atualizar_status_chamado, atribuir_chamado, listar_mensagens_chamado,
+    enviar_mensagem_chamado, listar_usuarios, criar_usuario,
+    buscar_usuario_por_email, atualizar_senha, salvar_totp_secret,
+    salvar_codigo_verificacao, verificar_codigo, buscar_usuario_por_id,
+    atualizar_usuario, excluir_usuario,
 )
 from auth import (
     autenticar, gerar_hash_senha, gerar_codigo_numerico, gerar_totp_secret,
@@ -22,9 +25,12 @@ st.set_page_config(
     layout="wide",
 )
 
-criar_tabela()
-atualizar_tabela()
+criar_tabela_usuarios()
+migrar_tabela_usuarios()
+criar_tabela_chamados()
+migrar_tabela_chamados()
 criar_tabela_mensagens()
+criar_tabela_codigos()
 
 
 STATUS_OPCOES = ["Novo", "Em Andamento", "Em Espera", "Resolvido", "Fechado"]
@@ -66,12 +72,16 @@ def injetar_css():
         }
 
         .card {
-            border: 1px solid #e2e8f0; border-radius: 12px; padding: 1rem 1.2rem;
-            margin-bottom: 0.8rem; background: #ffffff;
+            border: 1px solid #e2e8f0; border-left: 4px solid #e2e8f0; border-radius: 12px;
+            padding: 1rem 1.2rem; margin-bottom: 0.8rem; background: #ffffff; color: #0f172a;
         }
         .card:hover { border-color: #cbd5e1; }
-        .card-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 4px; }
+        .card-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 4px; color: #0f172a; }
         .card-meta { font-size: 0.78rem; color: #64748b; }
+
+        .card-sla-violado { border-left: 4px solid #dc2626; }
+        .card-sla-risco { border-left: 4px solid #d97706; }
+        .card-sla-pausado { border-left: 4px solid #7c3aed; }
 
         .ticket-selected {
             border: 1px solid #2563eb; box-shadow: 0 0 0 1px #2563eb inset;
@@ -99,6 +109,58 @@ def badge_urgencia(urgencia):
     return badge(urgencia or "—", CORES_URGENCIA.get(urgencia, "#64748b"))
 
 
+def badge_sla(texto, status_sla_texto):
+    return badge(texto, sla.CORES_SLA.get(status_sla_texto, "#64748b"))
+
+
+def classe_card_sla(estado_sla):
+    pior = sla.pior_status(estado_sla)
+    if pior == "Violado":
+        return " card-sla-violado"
+    if pior == "Em risco":
+        return " card-sla-risco"
+    if pior == "Pausado":
+        return " card-sla-pausado"
+    return ""
+
+
+def linha_sla_card(estado_sla):
+    resp = estado_sla["resposta"]
+    reso = estado_sla["resolucao"]
+    texto_resp = f"Resposta: {resp['status']}"
+    texto_reso = f"Resolução: {reso['status']}"
+    return (
+        f"{badge_sla(texto_resp, resp['status'])} "
+        f"{badge_sla(texto_reso, reso['status'])}"
+    )
+
+
+def bloco_sla_detalhe(chamado, estado_sla):
+    resp = estado_sla["resposta"]
+    reso = estado_sla["resolucao"]
+
+    linhas = [
+        f'<span class="sla-pill">⏱ Prazo de resposta: {sla.formatar_data(chamado.get("prazo_resposta"))}</span>',
+        badge_sla(resp["status"], resp["status"]),
+    ]
+    if resp["minutos_restantes"] is not None:
+        linhas.append(f'<span class="sla-pill">{sla.formatar_tempo_restante(resp["minutos_restantes"])}</span>')
+
+    st.markdown(" ".join(linhas), unsafe_allow_html=True)
+
+    linhas2 = [
+        f'<span class="sla-pill">✅ Prazo de resolução: {sla.formatar_data(chamado.get("prazo_resolucao"))}</span>',
+        badge_sla(reso["status"], reso["status"]),
+    ]
+    if reso["minutos_restantes"] is not None:
+        linhas2.append(f'<span class="sla-pill">{sla.formatar_tempo_restante(reso["minutos_restantes"])}</span>')
+
+    st.markdown(" ".join(linhas2), unsafe_allow_html=True)
+
+    if chamado.get("tempo_pausado_min") or chamado.get("pausado_em"):
+        st.caption("⏸️ O relógio de SLA fica pausado enquanto o chamado está em 'Em Espera' (aguardando o solicitante), conforme prática de gestão de incidentes do ITIL 4.")
+
+
 def cabecalho(titulo, subtitulo, icone="🎫"):
     st.markdown(f"""
     <div class="app-header">
@@ -116,6 +178,7 @@ for chave, valor_inicial in {
     "tela_atual": "login",
     "email_recuperacao": None,
     "chamado_selecionado_analista": None,
+    "chamado_selecionado_historico": None,
     "chamado_aberto_usuario": None,
 }.items():
     if chave not in st.session_state:
@@ -351,16 +414,18 @@ def _aba_abrir_chamado(usuario):
                     })
                     with st.spinner("Classificando e registrando o chamado..."):
                         classificacao = classificar_chamado(resultado["titulo"], resultado["descricao"])
+                        # A classificação devolve uma versão refinada de título/descrição;
+                        # usamos ela quando disponível, com a versão do chat como reserva.
+                        titulo_final = classificacao.get("titulo_resumido") or resultado["titulo"]
+                        descricao_final = classificacao.get("descricao_padronizada") or resultado["descricao"]
                         chamado_id = salvar_chamado(
-                            titulo=resultado["titulo"],
-                            descricao=resultado["descricao"],
+                            titulo=titulo_final,
+                            descricao=descricao_final,
                             categoria=classificacao.get("categoria"),
                             urgencia=classificacao.get("urgencia"),
                             sla_resposta=classificacao.get("tempo_sla_resposta"),
                             sla_resolucao=classificacao.get("tempo_sla_resolucao"),
                             equipe_destino=classificacao.get("equipe_destino"),
-                            titulo_resumido=classificacao.get("titulo_resumido"),
-                            descricao_padronizada=classificacao.get("descricao_padronizada"),
                             confiabilidade=classificacao.get("confiabilidade"),
                             usuario_id=usuario["id"],
                         )
@@ -405,10 +470,13 @@ def _aba_meus_chamados(usuario):
         for c in chamados:
             selecionado = st.session_state.chamado_aberto_usuario == c["id"]
             classe_extra = " ticket-selected" if selecionado else ""
+            estado_sla = sla.status_sla(c)
+            classe_extra += classe_card_sla(estado_sla)
             st.markdown(f"""
             <div class="card{classe_extra}">
-                <div class="card-title">#{c['id']} — {c.get('titulo_resumido') or c['titulo']}</div>
+                <div class="card-title">#{c['id']} — {c['titulo']}</div>
                 <div class="card-meta">{badge_status(c['status'])} {badge_urgencia(c['urgencia'])}</div>
+                <div class="card-meta" style="margin-top:6px;">{linha_sla_card(estado_sla)}</div>
                 <div class="card-meta" style="margin-top:6px;">Analista: {c.get('nome_analista') or 'Aguardando atribuição'}</div>
             </div>
             """, unsafe_allow_html=True)
@@ -428,16 +496,12 @@ def _aba_meus_chamados(usuario):
             return
 
         with st.container(border=True):
-            st.markdown(f"#### #{chamado['id']} — {chamado.get('titulo_resumido') or chamado['titulo']}")
+            st.markdown(f"#### #{chamado['id']} — {chamado['titulo']}")
             st.markdown(f"{badge_status(chamado['status'])} {badge_urgencia(chamado['urgencia'])}", unsafe_allow_html=True)
-            st.write(chamado.get("descricao_padronizada") or chamado["descricao"])
+            st.write(chamado["descricao"])
 
-            st.markdown(
-                f'<span class="sla-pill">⏱ Resposta: {chamado.get("sla_resposta") or "—"}</span>'
-                f'<span class="sla-pill">✅ Resolução: {chamado.get("sla_resolucao") or "—"}</span>'
-                f'<span class="sla-pill">👥 Equipe: {chamado.get("equipe_destino") or "—"}</span>',
-                unsafe_allow_html=True,
-            )
+            st.markdown(f'<span class="sla-pill">👥 Equipe: {chamado.get("equipe_destino") or "—"}</span>', unsafe_allow_html=True)
+            bloco_sla_detalhe(chamado, sla.status_sla(chamado))
             st.caption(f"Analista responsável: {chamado.get('nome_analista') or 'Aguardando atribuição'}")
 
         st.markdown("##### 💬 Conversa com o analista")
@@ -448,10 +512,22 @@ def tela_analista(usuario):
     injetar_css()
     cabecalho("Central de Serviços — Analista", f"{usuario['nome']} · Gestão de Incidentes (ITIL 4)", "🧑‍💻")
 
-    chamados = listar_chamados(limite=100)
+    chamados = listar_chamados(limite=200)
     if not chamados:
         st.info("Nenhum chamado registrado ainda.")
         return
+
+    aba_fila, aba_historico = st.tabs(["📥 Fila Ativa", "🗂️ Histórico (Fechados)"])
+
+    with aba_fila:
+        _aba_fila_ativa_analista(usuario, chamados)
+
+    with aba_historico:
+        _aba_historico_analista(usuario, chamados)
+
+
+def _aba_fila_ativa_analista(usuario, chamados_todos):
+    chamados = [c for c in chamados_todos if c["status"] != "Fechado"]
 
     total = len(chamados)
     novos = sum(1 for c in chamados if c["status"] == "Novo")
@@ -459,7 +535,7 @@ def tela_analista(usuario):
     meus = sum(1 for c in chamados if c.get("analista_id") == usuario["id"])
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total de chamados", total)
+    m1.metric("Chamados ativos", total)
     m2.metric("Novos", novos)
     m3.metric("Em andamento", em_andamento)
     m4.metric("Atribuídos a mim", meus)
@@ -468,13 +544,13 @@ def tela_analista(usuario):
 
     filtro_col1, filtro_col2, filtro_col3 = st.columns([1.2, 1.2, 1])
     with filtro_col1:
-        filtro_status = st.multiselect("Status", options=STATUS_OPCOES, default=[])
+        filtro_status = st.multiselect("Status", options=[s for s in STATUS_OPCOES if s != "Fechado"], default=[], key="filtro_status_ativa")
     with filtro_col2:
-        filtro_urgencia = st.multiselect("Urgência", options=["Critica", "Alta", "Media", "Baixa"], default=[])
+        filtro_urgencia = st.multiselect("Urgência", options=["Critica", "Alta", "Media", "Baixa"], default=[], key="filtro_urgencia_ativa")
     with filtro_col3:
         st.write("")
         st.write("")
-        somente_meus = st.checkbox("Somente meus chamados")
+        somente_meus = st.checkbox("Somente meus chamados", key="somente_meus_ativa")
 
     chamados_filtrados = chamados
     if filtro_status:
@@ -493,11 +569,14 @@ def tela_analista(usuario):
         for c in chamados_filtrados:
             selecionado = st.session_state.chamado_selecionado_analista == c["id"]
             classe_extra = " ticket-selected" if selecionado else ""
+            estado_sla = sla.status_sla(c)
+            classe_extra += classe_card_sla(estado_sla)
             responsavel = c.get("nome_analista") or "🔓 Sem atribuição"
             st.markdown(f"""
             <div class="card{classe_extra}">
-                <div class="card-title">#{c['id']} — {c.get('titulo_resumido') or c['titulo']}</div>
+                <div class="card-title">#{c['id']} — {c['titulo']}</div>
                 <div class="card-meta">{badge_status(c['status'])} {badge_urgencia(c['urgencia'])}</div>
+                <div class="card-meta" style="margin-top:6px;">{linha_sla_card(estado_sla)}</div>
                 <div class="card-meta" style="margin-top:6px;">👤 {c.get('nome_usuario') or '—'} · 🧑‍💻 {responsavel}</div>
             </div>
             """, unsafe_allow_html=True)
@@ -520,7 +599,7 @@ def tela_analista(usuario):
         with st.container(border=True):
             topo_esq, topo_dir = st.columns([3, 1])
             with topo_esq:
-                st.markdown(f"#### #{chamado['id']} — {chamado.get('titulo_resumido') or chamado['titulo']}")
+                st.markdown(f"#### #{chamado['id']} — {chamado['titulo']}")
                 st.markdown(f"{badge_status(chamado['status'])} {badge_urgencia(chamado['urgencia'])}", unsafe_allow_html=True)
             with topo_dir:
                 ja_atribuido_a_mim = chamado.get("analista_id") == usuario["id"]
@@ -531,16 +610,15 @@ def tela_analista(usuario):
                 else:
                     st.success("Você está atendendo")
 
-            st.write(chamado.get("descricao_padronizada") or chamado["descricao"])
+            st.write(chamado["descricao"])
 
             st.markdown(
                 f'<span class="sla-pill">📂 {chamado.get("categoria") or "—"}</span>'
-                f'<span class="sla-pill">⏱ Resposta: {chamado.get("sla_resposta") or "—"}</span>'
-                f'<span class="sla-pill">✅ Resolução: {chamado.get("sla_resolucao") or "—"}</span>'
                 f'<span class="sla-pill">👥 Equipe: {chamado.get("equipe_destino") or "—"}</span>'
                 f'<span class="sla-pill">🤖 Confiabilidade IA: {chamado.get("confiabilidade") or "—"}</span>',
                 unsafe_allow_html=True,
             )
+            bloco_sla_detalhe(chamado, sla.status_sla(chamado))
             st.caption(f"Solicitante: {chamado.get('nome_usuario') or '—'} · Aberto em {chamado.get('criado_em')}")
 
             st.divider()
@@ -552,11 +630,114 @@ def tela_analista(usuario):
                 st.write("")
                 if st.button("Salvar status", use_container_width=True):
                     atualizar_status_chamado(chamado["id"], novo_status)
+                    if novo_status == "Fechado":
+                        st.session_state.chamado_selecionado_analista = None
                     st.success(f"Status atualizado para '{novo_status}'.")
                     st.rerun()
 
         st.markdown("##### 💬 Conversa com o solicitante")
         painel_conversa_chamado(chamado, usuario, "analista", key_prefix="ana")
+
+
+def _aba_historico_analista(usuario, chamados_todos):
+    chamados = [c for c in chamados_todos if c["status"] == "Fechado"]
+
+    if not chamados:
+        st.info("Nenhum chamado fechado ainda. Registros encerrados aparecem aqui para consulta e auditoria.")
+        return
+
+    total_fechados = len(chamados)
+    dentro_prazo = sum(
+        1 for c in chamados
+        if sla.status_sla(c)["resposta"]["status"] == "Cumprido"
+        and sla.status_sla(c)["resolucao"]["status"] == "Cumprido"
+    )
+    violados = total_fechados - dentro_prazo
+    taxa_cumprimento = f"{(dentro_prazo / total_fechados * 100):.0f}%" if total_fechados else "—"
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total fechados", total_fechados)
+    m2.metric("SLA cumprido", dentro_prazo)
+    m3.metric("Taxa de cumprimento", taxa_cumprimento)
+
+    st.caption(
+        "Chamados fechados saem da fila operacional e ficam disponíveis aqui apenas para consulta, "
+        "auditoria e relatórios de desempenho — prática recomendada pelo ITIL 4 para gestão de registros de incidentes/solicitações encerrados."
+    )
+
+    st.divider()
+
+    filtro_col1, filtro_col2 = st.columns([1.2, 1])
+    with filtro_col1:
+        filtro_urgencia_hist = st.multiselect("Urgência", options=["Critica", "Alta", "Media", "Baixa"], default=[], key="filtro_urgencia_hist")
+    with filtro_col2:
+        somente_meus_hist = st.checkbox("Somente atendidos por mim", key="somente_meus_hist")
+
+    chamados_filtrados = chamados
+    if filtro_urgencia_hist:
+        chamados_filtrados = [c for c in chamados_filtrados if c["urgencia"] in filtro_urgencia_hist]
+    if somente_meus_hist:
+        chamados_filtrados = [c for c in chamados_filtrados if c.get("analista_id") == usuario["id"]]
+
+    lista_col, detalhe_col = st.columns([1, 1.6])
+
+    with lista_col:
+        st.markdown("##### 🗂️ Registros encerrados")
+        if not chamados_filtrados:
+            st.caption("Nenhum chamado fechado com os filtros selecionados.")
+        for c in chamados_filtrados:
+            estado_sla = sla.status_sla(c)
+            selecionado = st.session_state.get("chamado_selecionado_historico") == c["id"]
+            classe_extra = " ticket-selected" if selecionado else ""
+            classe_extra += classe_card_sla(estado_sla)
+            st.markdown(f"""
+            <div class="card{classe_extra}">
+                <div class="card-title">#{c['id']} — {c['titulo']}</div>
+                <div class="card-meta">{badge_status(c['status'])} {badge_urgencia(c['urgencia'])}</div>
+                <div class="card-meta" style="margin-top:6px;">{linha_sla_card(estado_sla)}</div>
+                <div class="card-meta" style="margin-top:6px;">👤 {c.get('nome_usuario') or '—'} · 🧑‍💻 {c.get('nome_analista') or '—'}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("Ver registro", key=f"hist_{c['id']}", use_container_width=True):
+                st.session_state.chamado_selecionado_historico = c["id"]
+                st.rerun()
+
+    with detalhe_col:
+        chamado_id_sel = st.session_state.get("chamado_selecionado_historico")
+        if chamado_id_sel is None:
+            st.info("Selecione um chamado fechado para ver o registro completo.")
+            return
+
+        chamado = buscar_chamado_por_id(chamado_id_sel)
+        if not chamado or chamado["status"] != "Fechado":
+            st.warning("Chamado não encontrado no histórico.")
+            st.session_state.chamado_selecionado_historico = None
+            return
+
+        with st.container(border=True):
+            st.markdown(f"#### #{chamado['id']} — {chamado['titulo']}")
+            st.markdown(f"{badge_status(chamado['status'])} {badge_urgencia(chamado['urgencia'])}", unsafe_allow_html=True)
+            st.write(chamado["descricao"])
+
+            st.markdown(
+                f'<span class="sla-pill">📂 {chamado.get("categoria") or "—"}</span>'
+                f'<span class="sla-pill">👥 Equipe: {chamado.get("equipe_destino") or "—"}</span>'
+                f'<span class="sla-pill">🤖 Confiabilidade IA: {chamado.get("confiabilidade") or "—"}</span>',
+                unsafe_allow_html=True,
+            )
+            bloco_sla_detalhe(chamado, sla.status_sla(chamado))
+
+            st.caption(
+                f"Solicitante: {chamado.get('nome_usuario') or '—'} · "
+                f"Atendido por: {chamado.get('nome_analista') or '—'}"
+            )
+            st.caption(
+                f"Aberto em {sla.formatar_data(chamado.get('criado_em'))} · "
+                f"Resolvido em {sla.formatar_data(chamado.get('resolvido_em'))}"
+            )
+
+        st.markdown("##### 💬 Histórico da conversa")
+        painel_conversa_chamado(chamado, usuario, "analista", key_prefix="hist")
 
 
 def tela_admin(usuario):

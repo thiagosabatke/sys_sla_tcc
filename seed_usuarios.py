@@ -2,9 +2,7 @@ from database import criar_tabela_usuarios, criar_usuario, buscar_usuario_por_em
 from auth import gerar_hash_senha
  
 USUARIOS_TESTE = [
-    {"nome": "Usuário Teste", "email": "usuario@teste.com", "senha": "usuario123", "papel": "usuario"},
-    {"nome": "Analista Teste", "email": "analista@teste.com", "senha": "analista123", "papel": "analista"},
-    {"nome": "Admin Teste", "email": "admin@teste.com", "senha": "admin123", "papel": "admin"},
+    {"nome": "Thiago Admin", "email": "tsabatke7@gmail.com", "senha": "Thiago123", "papel": "admin"},
 ]
  
 if __name__ == "__main__":

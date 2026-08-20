@@ -1,8 +1,12 @@
 import os
+from datetime import datetime
 import mysql.connector
 from dotenv import load_dotenv
 
+from sla import calcular_prazos
+
 load_dotenv()
+
 
 def conectar():
     return mysql.connector.connect(
@@ -13,27 +17,116 @@ def conectar():
     )
 
 
-def criar_tabela():
+def _coluna_existe(cursor, tabela, coluna):
+    cursor.execute(
+        """SELECT COUNT(*) FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s""",
+        (tabela, coluna),
+    )
+    return cursor.fetchone()[0] > 0
+
+
+def _fk_existe(cursor, tabela, nome_fk):
+    cursor.execute(
+        """SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+             AND CONSTRAINT_NAME = %s AND CONSTRAINT_TYPE = 'FOREIGN KEY'""",
+        (tabela, nome_fk),
+    )
+    return cursor.fetchone()[0] > 0
+
+
+# ---------------------------------------------------------------------------
+# Tabela: usuarios
+# (criada antes de 'chamados' porque 'chamados' referencia usuarios via FK)
+# ---------------------------------------------------------------------------
+
+def criar_tabela_usuarios():
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+
+            -- Perfil
+            nome VARCHAR(255) NOT NULL,
+            email VARCHAR(255) NOT NULL UNIQUE,
+            papel VARCHAR(20) NOT NULL DEFAULT 'usuario',
+
+            -- Autenticação
+            senha_hash VARCHAR(255) NOT NULL,
+            totp_secret VARCHAR(64),
+
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print("Tabela 'usuarios' pronta.")
+
+
+def migrar_tabela_usuarios():
+    """Garante 'totp_secret' em bancos criados antes dessa coluna existir
+    (idempotente: não faz nada se a coluna já estiver presente)."""
+    conn = conectar()
+    cursor = conn.cursor()
+    if not _coluna_existe(cursor, "usuarios", "totp_secret"):
+        cursor.execute("ALTER TABLE usuarios ADD COLUMN totp_secret VARCHAR(64)")
+        conn.commit()
+        print("Coluna 'totp_secret' adicionada.")
+    cursor.close()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Tabela: chamados
+# ---------------------------------------------------------------------------
+
+def criar_tabela_chamados():
+    """Cria a tabela principal do sistema. Colunas agrupadas por finalidade:
+    conteúdo do chamado, classificação feita pela IA, relacionamentos com
+    usuarios, ciclo de vida (status ITIL 4) e controle de prazo de SLA."""
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS chamados (
             id INT AUTO_INCREMENT PRIMARY KEY,
+
+            -- Conteúdo (título/descrição já na versão final: a IA refina o
+            -- texto coletado no chat antes de o chamado ser salvo)
             titulo VARCHAR(255) NOT NULL,
             descricao TEXT NOT NULL,
+
+            -- Classificação (IA)
             categoria VARCHAR(100),
             urgencia VARCHAR(50),
+            confiabilidade VARCHAR(50),
+            equipe_destino VARCHAR(100),
             sla_resposta VARCHAR(50),
             sla_resolucao VARCHAR(50),
-            equipe_destino VARCHAR(100),
-            titulo_resumido VARCHAR(255),
-            descricao_padronizada TEXT,
-            confiabilidade VARCHAR(50),
+
+            -- Relacionamentos
             usuario_id INT,
             analista_id INT,
-            status VARCHAR(50) DEFAULT 'Novo',
+
+            -- Ciclo de vida (ITIL 4)
+            status VARCHAR(50) NOT NULL DEFAULT 'Novo',
             criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+            -- Controle de SLA (motor em sla.py)
+            prazo_resposta DATETIME NULL,
+            prazo_resolucao DATETIME NULL,
+            primeira_resposta_em DATETIME NULL,
+            resolvido_em DATETIME NULL,
+            pausado_em DATETIME NULL,
+            tempo_pausado_min INT DEFAULT 0,
+
+            CONSTRAINT fk_chamados_usuario FOREIGN KEY (usuario_id)
+                REFERENCES usuarios(id) ON DELETE SET NULL,
+            CONSTRAINT fk_chamados_analista FOREIGN KEY (analista_id)
+                REFERENCES usuarios(id) ON DELETE SET NULL
         )
     """)
     conn.commit()
@@ -42,78 +135,99 @@ def criar_tabela():
     print("Tabela 'chamados' pronta.")
 
 
-def criar_tabela_mensagens():
+def migrar_tabela_chamados():
+    """Migração idempotente para bancos criados com o esquema antigo:
+    - adiciona colunas que passaram a existir depois da criação inicial;
+    - consolida 'titulo_resumido'/'descricao_padronizada' (duas colunas que
+      guardavam duas versões da IA para o mesmo texto) dentro de
+      'titulo'/'descricao' e remove as colunas antigas;
+    - tenta adicionar as FKs de usuario_id/analista_id -> usuarios(id), sem
+      quebrar o banco caso já existam registros órfãos.
+    """
     conn = conectar()
     cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS mensagens_chamado (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            chamado_id INT NOT NULL,
-            autor_id INT,
-            autor_nome VARCHAR(255),
-            autor_papel VARCHAR(20),
-            mensagem TEXT NOT NULL,
-            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (chamado_id) REFERENCES chamados(id) ON DELETE CASCADE
-        )
-    """)
-    conn.commit()
-    cursor.close()
-    conn.close()
-    print("Tabela 'mensagens_chamado' pronta.")
 
-
-def atualizar_tabela():
     colunas_novas = {
         "sla_resposta": "VARCHAR(50)",
         "sla_resolucao": "VARCHAR(50)",
         "equipe_destino": "VARCHAR(100)",
-        "titulo_resumido": "VARCHAR(255)",
-        "descricao_padronizada": "TEXT",
         "confiabilidade": "VARCHAR(50)",
         "usuario_id": "INT",
         "analista_id": "INT",
         "atualizado_em": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+        "prazo_resposta": "DATETIME NULL",
+        "prazo_resolucao": "DATETIME NULL",
+        "primeira_resposta_em": "DATETIME NULL",
+        "resolvido_em": "DATETIME NULL",
+        "pausado_em": "DATETIME NULL",
+        "tempo_pausado_min": "INT DEFAULT 0",
     }
-    conn = conectar()
-    cursor = conn.cursor()
     for nome_coluna, tipo in colunas_novas.items():
-        try:
+        if not _coluna_existe(cursor, "chamados", nome_coluna):
             cursor.execute(f"ALTER TABLE chamados ADD COLUMN {nome_coluna} {tipo}")
             conn.commit()
             print(f"Coluna '{nome_coluna}' adicionada.")
-        except mysql.connector.errors.ProgrammingError:
-            pass
-    cursor.close()
-    conn.close()
-    print("Tabela migrada/verificada.")
 
-
-def atualizar_tabela_usuarios():
-    conn = conectar()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("ALTER TABLE usuarios ADD COLUMN totp_secret VARCHAR(64)")
+    # Consolida as colunas redundantes (versão "bruta" x versão "refinada pela
+    # IA") em uma única coluna, preferindo a versão refinada quando existir.
+    if _coluna_existe(cursor, "chamados", "titulo_resumido"):
+        cursor.execute(
+            "UPDATE chamados SET titulo = COALESCE(NULLIF(titulo_resumido, ''), titulo)"
+        )
+        cursor.execute("ALTER TABLE chamados DROP COLUMN titulo_resumido")
         conn.commit()
-        print("Coluna 'totp_secret' adicionada.")
-    except mysql.connector.errors.ProgrammingError:
-        pass
+        print("Coluna 'titulo_resumido' consolidada em 'titulo' e removida.")
+
+    if _coluna_existe(cursor, "chamados", "descricao_padronizada"):
+        cursor.execute(
+            "UPDATE chamados SET descricao = COALESCE(NULLIF(descricao_padronizada, ''), descricao)"
+        )
+        cursor.execute("ALTER TABLE chamados DROP COLUMN descricao_padronizada")
+        conn.commit()
+        print("Coluna 'descricao_padronizada' consolidada em 'descricao' e removida.")
+
+    for nome_fk, coluna in (
+        ("fk_chamados_usuario", "usuario_id"),
+        ("fk_chamados_analista", "analista_id"),
+    ):
+        if not _fk_existe(cursor, "chamados", nome_fk):
+            try:
+                cursor.execute(
+                    f"""ALTER TABLE chamados
+                        ADD CONSTRAINT {nome_fk} FOREIGN KEY ({coluna})
+                        REFERENCES usuarios(id) ON DELETE SET NULL"""
+                )
+                conn.commit()
+                print(f"Chave estrangeira '{nome_fk}' adicionada.")
+            except mysql.connector.Error as erro:
+                print(
+                    f"Aviso: não foi possível adicionar '{nome_fk}' ({erro}). "
+                    "Provavelmente há usuario_id/analista_id órfãos (sem usuário "
+                    "correspondente); a tabela segue funcional sem essa FK."
+                )
+
     cursor.close()
     conn.close()
+    print("Tabela 'chamados' migrada/verificada.")
 
 
-def salvar_chamado(titulo, descricao, categoria, urgencia, sla_resposta=None,
-                    sla_resolucao=None, equipe_destino=None, titulo_resumido=None,
-                    descricao_padronizada=None, confiabilidade=None, usuario_id=None):
+def salvar_chamado(titulo, descricao, categoria, urgencia, confiabilidade=None,
+                    sla_resposta=None, sla_resolucao=None, equipe_destino=None,
+                    usuario_id=None):
+    criado_em = datetime.now()
+    prazo_resposta, prazo_resolucao = calcular_prazos(criado_em, urgencia)
+
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
         """INSERT INTO chamados
-           (titulo, descricao, categoria, urgencia, sla_resposta, sla_resolucao,
-            equipe_destino, titulo_resumido, descricao_padronizada, confiabilidade, usuario_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-        (titulo, descricao, categoria, urgencia, sla_resposta, sla_resolucao,
-         equipe_destino, titulo_resumido, descricao_padronizada, confiabilidade, usuario_id),
+           (titulo, descricao, categoria, urgencia, confiabilidade,
+            sla_resposta, sla_resolucao, equipe_destino, usuario_id,
+            criado_em, prazo_resposta, prazo_resolucao)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+        (titulo, descricao, categoria, urgencia, confiabilidade,
+         sla_resposta, sla_resolucao, equipe_destino, usuario_id,
+         criado_em, prazo_resposta, prazo_resolucao),
     )
     conn.commit()
     novo_id = cursor.lastrowid
@@ -164,10 +278,41 @@ def buscar_chamado_por_id(chamado_id):
 
 
 def atualizar_status_chamado(chamado_id, novo_status):
+    agora = datetime.now()
+
     conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        "SELECT status, pausado_em, tempo_pausado_min, resolvido_em FROM chamados WHERE id = %s",
+        (chamado_id,),
+    )
+    atual = cursor.fetchone()
+    cursor.close()
+
+    status_atual = atual["status"]
+    pausado_em_novo = atual["pausado_em"]
+    tempo_pausado_min_novo = atual["tempo_pausado_min"] or 0
+    resolvido_em_novo = atual["resolvido_em"]
+
+    if novo_status == "Em Espera" and status_atual != "Em Espera":
+        pausado_em_novo = agora
+    elif status_atual == "Em Espera" and novo_status != "Em Espera":
+        if atual["pausado_em"]:
+            tempo_pausado_min_novo += (agora - atual["pausado_em"]).total_seconds() / 60
+        pausado_em_novo = None
+
+    if novo_status in ("Resolvido", "Fechado"):
+        if resolvido_em_novo is None:
+            resolvido_em_novo = agora
+    else:
+        resolvido_em_novo = None
+
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE chamados SET status = %s WHERE id = %s", (novo_status, chamado_id)
+        """UPDATE chamados
+           SET status = %s, pausado_em = %s, tempo_pausado_min = %s, resolvido_em = %s
+           WHERE id = %s""",
+        (novo_status, pausado_em_novo, tempo_pausado_min_novo, resolvido_em_novo, chamado_id),
     )
     conn.commit()
     cursor.close()
@@ -189,6 +334,31 @@ def atribuir_chamado(chamado_id, analista_id):
     conn.commit()
     cursor.close()
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Tabela: mensagens_chamado
+# ---------------------------------------------------------------------------
+
+def criar_tabela_mensagens():
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mensagens_chamado (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            chamado_id INT NOT NULL,
+            autor_id INT,
+            autor_nome VARCHAR(255),
+            autor_papel VARCHAR(20),
+            mensagem TEXT NOT NULL,
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (chamado_id) REFERENCES chamados(id) ON DELETE CASCADE
+        )
+    """)
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print("Tabela 'mensagens_chamado' pronta.")
 
 
 def listar_mensagens_chamado(chamado_id):
@@ -214,29 +384,22 @@ def enviar_mensagem_chamado(chamado_id, autor_id, autor_nome, autor_papel, mensa
     )
     conn.commit()
     novo_id = cursor.lastrowid
+
+    if autor_papel == "analista":
+        cursor.execute(
+            "UPDATE chamados SET primeira_resposta_em = COALESCE(primeira_resposta_em, %s) WHERE id = %s",
+            (datetime.now(), chamado_id),
+        )
+        conn.commit()
+
     cursor.close()
     conn.close()
     return novo_id
 
 
-def criar_tabela_usuarios():
-    conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            nome VARCHAR(255) NOT NULL,
-            email VARCHAR(255) NOT NULL UNIQUE,
-            senha_hash VARCHAR(255) NOT NULL,
-            papel VARCHAR(20) NOT NULL DEFAULT 'usuario',
-            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    cursor.close()
-    conn.close()
-    print("Tabela 'usuarios' pronta.")
-
+# ---------------------------------------------------------------------------
+# CRUD: usuarios
+# ---------------------------------------------------------------------------
 
 def criar_usuario(nome, email, senha_hash, papel):
     conn = conectar()
@@ -335,6 +498,9 @@ def salvar_totp_secret(usuario_id, secret):
     conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Tabela + CRUD: codigos_verificacao
+# ---------------------------------------------------------------------------
 
 def criar_tabela_codigos():
     conn = conectar()
@@ -347,7 +513,8 @@ def criar_tabela_codigos():
             tipo VARCHAR(30) NOT NULL,
             criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             expira_em TIMESTAMP NOT NULL,
-            usado BOOLEAN DEFAULT FALSE
+            usado BOOLEAN DEFAULT FALSE,
+            FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
         )
     """)
     conn.commit()
@@ -391,9 +558,9 @@ def verificar_codigo(usuario_id, codigo, tipo):
 
 
 if __name__ == "__main__":
-    criar_tabela()
-    atualizar_tabela()
     criar_tabela_usuarios()
-    atualizar_tabela_usuarios()
+    migrar_tabela_usuarios()
+    criar_tabela_chamados()
+    migrar_tabela_chamados()
     criar_tabela_codigos()
     criar_tabela_mensagens()
