@@ -1,0 +1,4 @@
+usuario@teste.com / senha: usuario123 / papel: usuario
+analista@teste.com / senha: analista123 / papel: analista
+admin@teste.com / senha: admin123 / papel: admin
+thiago@gmail.com / senha: Thiago123 / papel: usuario

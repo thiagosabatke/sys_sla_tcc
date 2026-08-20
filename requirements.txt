@@ -1,0 +1,10 @@
+ollama
+mysql-connector-python
+sentence-transformers
+numpy
+python-dotenv
+streamlit
+bcrypt
+pyotp
+qrcode[pil]
+ 
