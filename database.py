@@ -36,11 +36,6 @@ def _fk_existe(cursor, tabela, nome_fk):
     return cursor.fetchone()[0] > 0
 
 
-# ---------------------------------------------------------------------------
-# Tabela: usuarios
-# (criada antes de 'chamados' porque 'chamados' referencia usuarios via FK)
-# ---------------------------------------------------------------------------
-
 def criar_tabela_usuarios():
     conn = conectar()
     cursor = conn.cursor()
@@ -67,8 +62,6 @@ def criar_tabela_usuarios():
 
 
 def migrar_tabela_usuarios():
-    """Garante 'totp_secret' em bancos criados antes dessa coluna existir
-    (idempotente: não faz nada se a coluna já estiver presente)."""
     conn = conectar()
     cursor = conn.cursor()
     if not _coluna_existe(cursor, "usuarios", "totp_secret"):
@@ -78,15 +71,7 @@ def migrar_tabela_usuarios():
     cursor.close()
     conn.close()
 
-
-# ---------------------------------------------------------------------------
-# Tabela: chamados
-# ---------------------------------------------------------------------------
-
 def criar_tabela_chamados():
-    """Cria a tabela principal do sistema. Colunas agrupadas por finalidade:
-    conteúdo do chamado, classificação feita pela IA, relacionamentos com
-    usuarios, ciclo de vida (status ITIL 4) e controle de prazo de SLA."""
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute("""
@@ -136,14 +121,6 @@ def criar_tabela_chamados():
 
 
 def migrar_tabela_chamados():
-    """Migração idempotente para bancos criados com o esquema antigo:
-    - adiciona colunas que passaram a existir depois da criação inicial;
-    - consolida 'titulo_resumido'/'descricao_padronizada' (duas colunas que
-      guardavam duas versões da IA para o mesmo texto) dentro de
-      'titulo'/'descricao' e remove as colunas antigas;
-    - tenta adicionar as FKs de usuario_id/analista_id -> usuarios(id), sem
-      quebrar o banco caso já existam registros órfãos.
-    """
     conn = conectar()
     cursor = conn.cursor()
 
@@ -168,8 +145,6 @@ def migrar_tabela_chamados():
             conn.commit()
             print(f"Coluna '{nome_coluna}' adicionada.")
 
-    # Consolida as colunas redundantes (versão "bruta" x versão "refinada pela
-    # IA") em uma única coluna, preferindo a versão refinada quando existir.
     if _coluna_existe(cursor, "chamados", "titulo_resumido"):
         cursor.execute(
             "UPDATE chamados SET titulo = COALESCE(NULLIF(titulo_resumido, ''), titulo)"
@@ -205,6 +180,13 @@ def migrar_tabela_chamados():
                     "Provavelmente há usuario_id/analista_id órfãos (sem usuário "
                     "correspondente); a tabela segue funcional sem essa FK."
                 )
+
+    # Mantém os nomes de status usados pela interface atual e também recupera
+    # registros criados por versões anteriores da aplicação.
+    cursor.execute("UPDATE chamados SET status = 'Em Andamento' WHERE status = 'Em Aberto'")
+    cursor.execute("UPDATE chamados SET status = 'Em Espera' WHERE status = 'Aguardando'")
+    cursor.execute("UPDATE chamados SET status = 'Fechado' WHERE status = 'Finalizado'")
+    conn.commit()
 
     cursor.close()
     conn.close()
@@ -320,8 +302,6 @@ def atualizar_status_chamado(chamado_id, novo_status):
 
 
 def atribuir_chamado(chamado_id, analista_id):
-    """Vincula um analista ao chamado (assignment, conforme ITIL 4) e,
-    se o chamado ainda estiver 'Novo', move para 'Em Andamento'."""
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
@@ -335,10 +315,6 @@ def atribuir_chamado(chamado_id, analista_id):
     cursor.close()
     conn.close()
 
-
-# ---------------------------------------------------------------------------
-# Tabela: mensagens_chamado
-# ---------------------------------------------------------------------------
 
 def criar_tabela_mensagens():
     conn = conectar()
@@ -377,6 +353,16 @@ def listar_mensagens_chamado(chamado_id):
 def enviar_mensagem_chamado(chamado_id, autor_id, autor_nome, autor_papel, mensagem):
     conn = conectar()
     cursor = conn.cursor()
+    cursor.execute("SELECT status FROM chamados WHERE id = %s", (chamado_id,))
+    chamado = cursor.fetchone()
+    if not chamado:
+        cursor.close()
+        conn.close()
+        raise ValueError("Chamado não encontrado.")
+    if chamado[0] in ("Finalizado", "Cancelado", "Fechado"):
+        cursor.close()
+        conn.close()
+        raise ValueError("Não é possível enviar mensagens para um chamado encerrado.")
     cursor.execute(
         """INSERT INTO mensagens_chamado (chamado_id, autor_id, autor_nome, autor_papel, mensagem)
            VALUES (%s, %s, %s, %s, %s)""",
@@ -397,9 +383,104 @@ def enviar_mensagem_chamado(chamado_id, autor_id, autor_nome, autor_papel, mensa
     return novo_id
 
 
-# ---------------------------------------------------------------------------
-# CRUD: usuarios
-# ---------------------------------------------------------------------------
+def criar_tabela_anexos():
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS anexos_chamado (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            chamado_id INT NOT NULL,
+            autor_id INT,
+            nome_arquivo VARCHAR(255) NOT NULL,
+            tipo_arquivo VARCHAR(120),
+            conteudo LONGBLOB NOT NULL,
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (chamado_id) REFERENCES chamados(id) ON DELETE CASCADE,
+            FOREIGN KEY (autor_id) REFERENCES usuarios(id) ON DELETE SET NULL
+        )
+    """)
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def salvar_anexo_chamado(chamado_id, autor_id, nome_arquivo, tipo_arquivo, conteudo):
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM chamados WHERE id = %s", (chamado_id,))
+    chamado = cursor.fetchone()
+    if not chamado:
+        cursor.close()
+        conn.close()
+        raise ValueError("Chamado não encontrado.")
+    if chamado[0] in ("Finalizado", "Cancelado", "Fechado"):
+        cursor.close()
+        conn.close()
+        raise ValueError("Não é possível adicionar anexos a um chamado encerrado.")
+    cursor.execute(
+        """INSERT INTO anexos_chamado
+           (chamado_id, autor_id, nome_arquivo, tipo_arquivo, conteudo)
+           VALUES (%s, %s, %s, %s, %s)""",
+        (chamado_id, autor_id, nome_arquivo, tipo_arquivo, conteudo),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def listar_anexos_chamado(chamado_id):
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        """SELECT id, nome_arquivo, tipo_arquivo, conteudo, criado_em
+           FROM anexos_chamado WHERE chamado_id = %s ORDER BY criado_em ASC""",
+        (chamado_id,),
+    )
+    resultados = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return resultados
+
+
+def criar_tabela_pesquisas_satisfacao():
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pesquisas_satisfacao (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            chamado_id INT NOT NULL UNIQUE,
+            nota TINYINT NOT NULL,
+            comentario TEXT,
+            respondido_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (chamado_id) REFERENCES chamados(id) ON DELETE CASCADE
+        )
+    """)
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def buscar_pesquisa_satisfacao(chamado_id):
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM pesquisas_satisfacao WHERE chamado_id = %s", (chamado_id,))
+    resultado = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return resultado
+
+
+def salvar_pesquisa_satisfacao(chamado_id, nota, comentario):
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO pesquisas_satisfacao (chamado_id, nota, comentario) VALUES (%s, %s, %s)",
+        (chamado_id, nota, comentario),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
 
 def criar_usuario(nome, email, senha_hash, papel):
     conn = conectar()
@@ -498,10 +579,6 @@ def salvar_totp_secret(usuario_id, secret):
     conn.close()
 
 
-# ---------------------------------------------------------------------------
-# Tabela + CRUD: codigos_verificacao
-# ---------------------------------------------------------------------------
-
 def criar_tabela_codigos():
     conn = conectar()
     cursor = conn.cursor()
@@ -564,3 +641,5 @@ if __name__ == "__main__":
     migrar_tabela_chamados()
     criar_tabela_codigos()
     criar_tabela_mensagens()
+    criar_tabela_anexos()
+    criar_tabela_pesquisas_satisfacao()

@@ -16,6 +16,7 @@ CORES_SLA = {
     "Violado": "#dc2626",
     "Cumprido": "#2563eb",
     "Pausado": "#7c3aed",
+    "Não aplicável": "#64748b",
 }
 
 
@@ -64,6 +65,14 @@ def avaliar_metrica(criado_em, prazo, concluido_em, pausado_em, tempo_pausado_mi
 
 def status_sla(chamado, agora=None):
     agora = agora or datetime.now()
+    if chamado.get("status") == "Cancelado":
+        nao_aplicavel = {
+            "status": "Não aplicável",
+            "prazo_efetivo": None,
+            "minutos_restantes": None,
+        }
+        return {"resposta": nao_aplicavel, "resolucao": nao_aplicavel}
+
     resposta = avaliar_metrica(
         chamado["criado_em"],
         chamado.get("prazo_resposta"),
@@ -84,7 +93,7 @@ def status_sla(chamado, agora=None):
 
 
 def pior_status(estado):
-    prioridade = ["Violado", "Em risco", "Pausado", "Dentro do prazo", "Cumprido"]
+    prioridade = ["Violado", "Em risco", "Pausado", "Dentro do prazo", "Cumprido", "Não aplicável"]
     estados = [estado["resposta"]["status"], estado["resolucao"]["status"]]
     for nivel in prioridade:
         if nivel in estados:

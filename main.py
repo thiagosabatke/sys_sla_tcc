@@ -7,8 +7,6 @@ def abrir_chamado(titulo, descricao):
 
     resultado = classificar_chamado(titulo, descricao)
 
-    # A classificação devolve uma versão refinada de título/descrição;
-    # usamos ela quando disponível, com o texto original como reserva.
     titulo_final = resultado.get("titulo_resumido") or titulo
     descricao_final = resultado.get("descricao_padronizada") or descricao
 
