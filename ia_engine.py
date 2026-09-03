@@ -49,7 +49,7 @@ Resposta: {"categoria": "Hardware", "urgencia": "Alta", "tempo_sla_resposta": "1
 
 
 def classificar_chamado(titulo, descricao):
-    trechos = buscar_contexto(f"{titulo} {descricao}", top_k=2)
+    trechos = buscar_contexto(f"{titulo} {descricao}", top_k=3)
     contexto = "\n\n---\n\n".join(t["conteudo"] for t in trechos)
 
     prompt_usuario = f"""Contexto (base de conhecimento):
@@ -165,7 +165,7 @@ Exemplo de resposta ao perguntar (siga esse formato SEMPRE, nunca escreva a perg
 
 def conversar_coleta(historico, forcar_finalizar=False):
     texto_usuario_ate_agora = " ".join(m["content"] for m in historico if m["role"] == "user")
-    trechos = buscar_contexto(texto_usuario_ate_agora, top_k=2) if texto_usuario_ate_agora else []
+    trechos = buscar_contexto(texto_usuario_ate_agora, top_k=3) if texto_usuario_ate_agora else []
     contexto = "\n\n---\n\n".join(t["conteudo"] for t in trechos) if trechos else "(nenhum contexto específico ainda)"
 
     prompt_sistema = PROMPT_COLETA_TEMPLATE.format(contexto=contexto)

@@ -54,6 +54,12 @@ usuários, chamados, mensagens, anexos e pesquisas de satisfação.
   `Resolvido` e `Fechado`) e consulta o histórico encerrado.
   Chamados cancelados ficam em uma lista própria, são mantidos para auditoria
   e não entram na taxa de cumprimento de SLA.
+- Ciclo de vida: o chamado percorre `Novo → Em Andamento → Em Espera` (quando
+  depende do solicitante) `→ Em Andamento → Resolvido`. Após a validação do
+  solicitante, ele é `Fechado`; caso a solução não atenda, retorna para `Em
+  Andamento`. O solicitante só pode cancelar um chamado em `Novo`, antes de
+  ele ser atribuído a um analista, informando o motivo. As transições são
+  validadas no banco, não apenas na tela.
 - Administrador: cadastra, edita e exclui contas de usuário, analista e admin.
 
 Se `python main.py` rodar sem erro e você ver os chamados classificados

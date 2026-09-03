@@ -1,8 +1,10 @@
+import re
 import streamlit as st
 from datetime import datetime
 from pathlib import Path
 
 from ia_engine import classificar_chamado, conversar_coleta
+from rag import listar_artigos
 import sla
 from database import (
     salvar_chamado, criar_tabela_usuarios, migrar_tabela_usuarios,
@@ -16,6 +18,9 @@ from database import (
     criar_tabela_anexos, salvar_anexo_chamado, listar_anexos_chamado,
     criar_tabela_pesquisas_satisfacao, buscar_pesquisa_satisfacao,
     salvar_pesquisa_satisfacao,
+    cancelar_chamado_sem_atribuicao,
+    confirmar_resolucao_usuario,
+    reabrir_chamado_usuario,
 )
 from auth import (
     autenticar, gerar_hash_senha, gerar_codigo_numerico, gerar_totp_secret,
@@ -40,6 +45,19 @@ criar_tabela_pesquisas_satisfacao()
 
 STATUS_OPCOES = ["Novo", "Em Andamento", "Em Espera", "Resolvido", "Fechado"]
 STATUS_ENCERRADOS = {"Fechado", "Cancelado"}
+MOTIVOS_CANCELAMENTO = [
+    "Desisti da solicitação",
+    "Problema resolvido sem suporte",
+    "Chamado aberto por engano",
+    "Chamado duplicado",
+]
+
+MOTIVOS_CANCELAMENTO_ANALISTA = [
+    "Chamado duplicado",
+    "Chamado aberto indevidamente",
+    "Solicitação fora do escopo de atendimento",
+    "Informações insuficientes para atendimento",
+]
 
 CORES_STATUS = {
     "Novo": "#2563eb",          
@@ -100,8 +118,69 @@ def injetar_css():
             display: inline-block; background: #f1f5f9; border-radius: 8px;
             padding: 2px 8px; font-size: 0.75rem; color: #334155; margin-right: 6px;
         }
+
+        .artigo-card {
+            border: 1px solid #e2e8f0; border-radius: 12px; padding: 1rem 1.2rem;
+            margin-bottom: 0.8rem; background: #ffffff;
+        }
+        .artigo-titulo { font-weight: 700; font-size: 1.02rem; color: #0f172a; margin-bottom: 4px; }
+        .artigo-resumo { font-size: 0.85rem; color: #475569; }
+        .artigo-tag {
+            display: inline-block; background: #f1f5f9; color: #334155;
+            border-radius: 999px; padding: 2px 10px; font-size: 0.72rem;
+            margin: 6px 6px 0 0;
+        }
+        .artigo-secao-titulo {
+            font-weight: 600; font-size: 0.86rem; color: #0f172a;
+            margin: 0.9rem 0 0.3rem 0; display: flex; align-items: center; gap: 6px;
+        }
     </style>
     """, unsafe_allow_html=True)
+
+
+CATEGORIA_COR = {
+    "Acesso": "#2563eb",
+    "Software": "#7c3aed",
+    "Hardware": "#d97706",
+    "Rede": "#0891b2",
+    "Outros": "#64748b",
+}
+
+ICONE_SECAO = {
+    "exemplos de chamados típicos": "📋",
+    "informações que devem constar no chamado": "📝",
+    "criticidade sugerida": "⚠️",
+    "perguntas para a coleta da ia": "❓",
+    "casos recorrentes": "📌",
+    "casos recorrentes e encaminhamento": "📌",
+    "procedimentos seguros": "🔒",
+    "segurança": "🔒",
+    "cuidados": "🔒",
+    "regras de urgência": "⏱️",
+    "procedimento padrão": "🛠️",
+    "verificações iniciais": "🛠️",
+    "evidências úteis para o chamado": "🔎",
+    "boas práticas de diagnóstico": "🛠️",
+}
+
+
+def _renderizar_secoes_artigo(corpo):
+    partes = corpo.split("\n", 1)
+    resto = partes[1] if len(partes) > 1 else corpo
+    blocos = re.split(r"(?=^##\s)", resto, flags=re.MULTILINE)
+    for bloco in blocos:
+        bloco = bloco.strip()
+        if not bloco:
+            continue
+        if bloco.startswith("##"):
+            linhas = bloco.split("\n", 1)
+            titulo_secao = linhas[0].lstrip("#").strip()
+            conteudo_secao = linhas[1] if len(linhas) > 1 else ""
+            icone = ICONE_SECAO.get(titulo_secao.lower(), "🔹")
+            st.markdown(f'<div class="artigo-secao-titulo">{icone} {titulo_secao}</div>', unsafe_allow_html=True)
+            st.markdown(conteudo_secao)
+        else:
+            st.markdown(bloco)
 
 
 def badge(texto, cor):
@@ -438,14 +517,57 @@ def painel_pesquisa_satisfacao(chamado):
 
 def _aba_portal_conhecimento():
     st.caption("Consulte artigos e orientações antes de abrir um chamado. Talvez você consiga resolver aqui mesmo.")
-    pasta = Path(__file__).parent / "base_conhecimento"
-    arquivos = sorted(pasta.glob("*.md"))
-    if not arquivos:
+
+    artigos = listar_artigos()
+    if not artigos:
         st.info("A base de conhecimento ainda não possui artigos publicados.")
         return
-    for arquivo in arquivos:
-        with st.expander(arquivo.stem.replace("_", " ").title()):
-            st.markdown(arquivo.read_text(encoding="utf-8"))
+
+    col_busca, col_categoria = st.columns([2.4, 1])
+    with col_busca:
+        termo_busca = st.text_input(
+            "🔍 Pesquisar artigo",
+            placeholder="Ex.: senha bloqueada, impressora, wi-fi, e-mail não envia...",
+            key="busca_portal_artigos",
+        ).strip().lower()
+    with col_categoria:
+        categorias_disponiveis = ["Todas"] + sorted({a["categoria"] for a in artigos})
+        categoria_filtro = st.selectbox("Categoria", categorias_disponiveis, key="filtro_categoria_artigos")
+
+    def _artigo_corresponde(artigo):
+        if categoria_filtro != "Todas" and artigo["categoria"] != categoria_filtro:
+            return False
+        if not termo_busca:
+            return True
+        alvo = " ".join([
+            artigo["titulo"],
+            artigo["resumo"],
+            artigo["categoria"],
+            " ".join(artigo["tags"]),
+            artigo["corpo"],
+        ]).lower()
+        return all(palavra in alvo for palavra in termo_busca.split())
+
+    artigos_filtrados = [a for a in artigos if _artigo_corresponde(a)]
+
+    st.caption(f"{len(artigos_filtrados)} de {len(artigos)} artigo(s)")
+
+    if not artigos_filtrados:
+        st.warning("Nenhum artigo encontrado para essa busca. Tente outro termo ou abra um chamado na aba ao lado.")
+        return
+
+    for artigo in artigos_filtrados:
+        cor = CATEGORIA_COR.get(artigo["categoria"], "#64748b")
+        with st.expander(artigo["titulo"]):
+            st.markdown(
+                f'{badge(artigo["categoria"], cor)} '
+                f'<span class="artigo-resumo">&nbsp; {artigo["resumo"]}</span>',
+                unsafe_allow_html=True,
+            )
+            if artigo["tags"]:
+                tags_html = "".join(f'<span class="artigo-tag">{t}</span>' for t in artigo["tags"][:8])
+                st.markdown(tags_html, unsafe_allow_html=True)
+            _renderizar_secoes_artigo(artigo["corpo"])
 
 
 def tela_usuario(usuario):
@@ -616,17 +738,59 @@ def _aba_meus_chamados(usuario, grupo):
             st.markdown(f'<span class="sla-pill">👥 Equipe: {chamado.get("equipe_destino") or "—"}</span>', unsafe_allow_html=True)
             bloco_sla_detalhe(chamado, sla.status_sla(chamado))
             st.caption(f"Analista responsável: {chamado.get('nome_analista') or 'Aguardando atribuição'}")
+            if chamado["status"] == "Cancelado":
+                st.caption(f"Motivo do cancelamento: {chamado.get('motivo_cancelamento') or 'Não informado'}")
 
         st.markdown("##### Conversa com o analista")
         painel_conversa_chamado(chamado, usuario, "usuario", key_prefix="usr")
         painel_anexos_chamado(chamado, usuario, key_prefix="usr")
 
-        if chamado["status"] not in STATUS_ENCERRADOS:
+        if chamado["status"] == "Novo" and chamado.get("analista_id") is None:
             st.divider()
-            if st.button("Cancelar chamado", key=f"cancelar_{chamado['id']}"):
-                atualizar_status_chamado(chamado["id"], "Cancelado")
-                st.success("Chamado cancelado.")
-                st.rerun()
+            chave_formulario = f"mostrar_cancelamento_{chamado['id']}"
+            if not st.session_state.get(chave_formulario):
+                if st.button("Cancelar chamado", key=f"cancelar_{chamado['id']}"):
+                    st.session_state[chave_formulario] = True
+                    st.rerun()
+            else:
+                with st.form(f"form_cancelar_{chamado['id']}"):
+                    st.warning("Ao cancelar, o chamado será mantido somente para auditoria.")
+                    motivo = st.selectbox("Motivo do cancelamento", MOTIVOS_CANCELAMENTO)
+                    confirmar_cancelamento = st.form_submit_button("Confirmar cancelamento", type="primary")
+                    voltar = st.form_submit_button("Voltar")
+
+                if voltar:
+                    st.session_state[chave_formulario] = False
+                    st.rerun()
+                if confirmar_cancelamento:
+                    try:
+                        cancelar_chamado_sem_atribuicao(chamado["id"], motivo)
+                        st.session_state[chave_formulario] = False
+                        st.success("Chamado cancelado.")
+                    except ValueError as erro:
+                        st.error(str(erro))
+                    st.rerun()
+
+        elif chamado["status"] == "Resolvido":
+            st.divider()
+            st.info("O analista marcou este chamado como resolvido. Confirme o resultado ou solicite a reabertura.")
+            confirmar, reabrir = st.columns(2)
+            with confirmar:
+                if st.button("Confirmar solução", type="primary", key=f"fechar_{chamado['id']}"):
+                    try:
+                        confirmar_resolucao_usuario(chamado["id"], usuario["id"])
+                        st.success("Solução confirmada. Chamado fechado.")
+                    except ValueError as erro:
+                        st.error(str(erro))
+                    st.rerun()
+            with reabrir:
+                if st.button("Solicitar reabertura", key=f"reabrir_{chamado['id']}"):
+                    try:
+                        reabrir_chamado_usuario(chamado["id"], usuario["id"])
+                        st.success("Chamado reaberto e devolvido para atendimento.")
+                    except ValueError as erro:
+                        st.error(str(erro))
+                    st.rerun()
 
         painel_pesquisa_satisfacao(chamado)
 
@@ -732,13 +896,23 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
                 st.markdown(f"#### #{chamado['id']} — {chamado['titulo']}")
                 st.markdown(f"{badge_status(chamado['status'])} {badge_urgencia(chamado['urgencia'])}", unsafe_allow_html=True)
             with topo_dir:
-                ja_atribuido_a_mim = chamado.get("analista_id") == usuario["id"]
-                if not ja_atribuido_a_mim:
+                analista_atribuido = chamado.get("analista_id")
+                ja_atribuido_a_mim = analista_atribuido == usuario["id"]
+                if analista_atribuido is None:
                     if st.button("Atender chamado", type="primary", use_container_width=True):
-                        atribuir_chamado(chamado["id"], usuario["id"])
+                        try:
+                            atribuir_chamado(chamado["id"], usuario["id"])
+                        except ValueError as erro:
+                            st.error(str(erro))
+                        st.rerun()
+                    if st.button("Cancelar chamado", key=f"cancelar_analista_{chamado['id']}", use_container_width=True):
+                        st.session_state[f"mostrar_cancelamento_analista_{chamado['id']}"] = True
                         st.rerun()
                 else:
-                    st.success("Você está atendendo")
+                    if ja_atribuido_a_mim:
+                        st.success("Você está atendendo")
+                    else:
+                        st.warning(f"Atribuído a {chamado.get('nome_analista') or 'outro analista'}")
 
             st.write(chamado["descricao"])
 
@@ -751,19 +925,48 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
             bloco_sla_detalhe(chamado, sla.status_sla(chamado))
             st.caption(f"Solicitante: {chamado.get('nome_usuario') or '-'} · Aberto em {chamado.get('criado_em').strftime('%d/%m/%Y %H:%M:%S')}")
 
-            st.divider()
-            status_col, botao_col = st.columns([2, 1])
-            with status_col:
-                indice_atual = STATUS_OPCOES.index(chamado["status"]) if chamado["status"] in STATUS_OPCOES else 0
-                novo_status = st.selectbox("Atualizar status", options=STATUS_OPCOES, index=indice_atual, key=f"status_{chamado['id']}")
-            with botao_col:
-                st.write("")
-                if st.button("Salvar status", use_container_width=True):
-                    atualizar_status_chamado(chamado["id"], novo_status)
-                    if novo_status == "Fechado":
-                        st.session_state.chamado_selecionado_analista = None
-                    st.success(f"Status atualizado para '{novo_status}'.")
+            if ja_atribuido_a_mim and chamado["status"] == "Em Andamento":
+                st.divider()
+                st.caption("Uma mensagem enviada ao solicitante coloca o chamado automaticamente em espera até a resposta dele.")
+                if st.button("Marcar como resolvido", type="primary", use_container_width=True):
+                    try:
+                        atualizar_status_chamado(chamado["id"], "Resolvido")
+                        st.success("Aguardando a confirmação do solicitante.")
+                    except ValueError as erro:
+                        st.error(str(erro))
                     st.rerun()
+            elif ja_atribuido_a_mim and chamado["status"] == "Em Espera":
+                st.info("Aguardando a resposta do solicitante. Quando ele responder, o chamado volta automaticamente para Em Andamento.")
+            elif ja_atribuido_a_mim and chamado["status"] == "Resolvido":
+                st.info("Aguardando a confirmação do solicitante para fechar ou reabrir o chamado.")
+
+        chave_cancelamento_analista = f"mostrar_cancelamento_analista_{chamado['id']}"
+        if chamado.get("analista_id") is None and st.session_state.get(chave_cancelamento_analista):
+            with st.form(f"form_cancelar_analista_{chamado['id']}"):
+                st.warning("O chamado será cancelado sem ser atribuído e mantido para auditoria.")
+                motivo_analista = st.selectbox(
+                    "Motivo do cancelamento",
+                    MOTIVOS_CANCELAMENTO_ANALISTA,
+                    key=f"motivo_cancelamento_analista_{chamado['id']}",
+                )
+                confirmar_cancelamento_analista = st.form_submit_button("Confirmar cancelamento", type="primary")
+                voltar_cancelamento_analista = st.form_submit_button("Voltar")
+
+            if voltar_cancelamento_analista:
+                st.session_state[chave_cancelamento_analista] = False
+                st.rerun()
+            if confirmar_cancelamento_analista:
+                try:
+                    cancelar_chamado_sem_atribuicao(chamado["id"], motivo_analista)
+                    st.session_state[chave_cancelamento_analista] = False
+                    st.success("Chamado cancelado.")
+                except ValueError as erro:
+                    st.error(str(erro))
+                st.rerun()
+
+        if chamado.get("analista_id") != usuario["id"]:
+            st.info("Atribua este chamado a você para enviar mensagens, anexos ou executar ações de atendimento.")
+            return
 
         st.markdown("##### Conversa com o solicitante")
         painel_conversa_chamado(chamado, usuario, "analista", key_prefix="ana")
@@ -916,6 +1119,7 @@ def _aba_cancelados_analista(usuario, chamados_todos):
                 f"Solicitante: {chamado.get('nome_usuario') or '—'} · "
                 "SLA: não aplicável (cancelado pelo usuário)."
             )
+            st.caption(f"Motivo do cancelamento: {chamado.get('motivo_cancelamento') or 'Não informado'}")
 
         st.markdown("##### Histórico da conversa")
         painel_conversa_chamado(chamado, usuario, "analista", key_prefix="cancel_hist")

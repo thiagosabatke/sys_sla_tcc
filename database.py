@@ -5,6 +5,19 @@ from dotenv import load_dotenv
 
 from sla import calcular_prazos
 
+TRANSICOES_STATUS = {
+    "Novo": ("Em Andamento",),
+    "Em Andamento": ("Em Espera", "Resolvido"),
+    "Em Espera": ("Em Andamento",),
+    "Resolvido": ("Em Andamento",),
+    "Fechado": (),
+    "Cancelado": (),
+}
+
+
+def status_disponiveis(status_atual):
+    return list(TRANSICOES_STATUS.get(status_atual, ()))
+
 load_dotenv()
 
 
@@ -97,6 +110,7 @@ def criar_tabela_chamados():
 
             -- Ciclo de vida (ITIL 4)
             status VARCHAR(50) NOT NULL DEFAULT 'Novo',
+            motivo_cancelamento VARCHAR(255) NULL,
             criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
@@ -131,6 +145,7 @@ def migrar_tabela_chamados():
         "confiabilidade": "VARCHAR(50)",
         "usuario_id": "INT",
         "analista_id": "INT",
+        "motivo_cancelamento": "VARCHAR(255) NULL",
         "atualizado_em": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
         "prazo_resposta": "DATETIME NULL",
         "prazo_resolucao": "DATETIME NULL",
@@ -181,8 +196,6 @@ def migrar_tabela_chamados():
                     "correspondente); a tabela segue funcional sem essa FK."
                 )
 
-    # Mantém os nomes de status usados pela interface atual e também recupera
-    # registros criados por versões anteriores da aplicação.
     cursor.execute("UPDATE chamados SET status = 'Em Andamento' WHERE status = 'Em Aberto'")
     cursor.execute("UPDATE chamados SET status = 'Em Espera' WHERE status = 'Aguardando'")
     cursor.execute("UPDATE chamados SET status = 'Fechado' WHERE status = 'Finalizado'")
@@ -271,7 +284,20 @@ def atualizar_status_chamado(chamado_id, novo_status):
     atual = cursor.fetchone()
     cursor.close()
 
+    if not atual:
+        conn.close()
+        raise ValueError("Chamado não encontrado.")
+
     status_atual = atual["status"]
+    if novo_status == status_atual:
+        conn.close()
+        return
+
+    if novo_status not in status_disponiveis(status_atual):
+        conn.close()
+        raise ValueError(
+            f"Transição inválida: '{status_atual}' não pode ser alterado para '{novo_status}'."
+        )
     pausado_em_novo = atual["pausado_em"]
     tempo_pausado_min_novo = atual["tempo_pausado_min"] or 0
     resolvido_em_novo = atual["resolvido_em"]
@@ -307,10 +333,71 @@ def atribuir_chamado(chamado_id, analista_id):
     cursor.execute(
         """UPDATE chamados
            SET analista_id = %s,
-               status = IF(status = 'Novo', 'Em Andamento', status)
-           WHERE id = %s""",
+               status = 'Em Andamento'
+           WHERE id = %s AND status = 'Novo' AND analista_id IS NULL""",
         (analista_id, chamado_id),
     )
+    if cursor.rowcount == 0:
+        cursor.close()
+        conn.close()
+        raise ValueError("Este chamado já foi atribuído ou não está mais disponível para atendimento.")
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def cancelar_chamado_sem_atribuicao(chamado_id, motivo):
+    if not motivo or not motivo.strip():
+        raise ValueError("Informe o motivo do cancelamento.")
+
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute(
+        """UPDATE chamados
+           SET status = 'Cancelado', motivo_cancelamento = %s
+           WHERE id = %s AND status = 'Novo' AND analista_id IS NULL""",
+        (motivo.strip(), chamado_id),
+    )
+    if cursor.rowcount == 0:
+        cursor.close()
+        conn.close()
+        raise ValueError("O chamado não pode mais ser cancelado porque já foi atribuído ou saiu do status Novo.")
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def confirmar_resolucao_usuario(chamado_id, usuario_id):
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute(
+        """UPDATE chamados
+           SET status = 'Fechado'
+           WHERE id = %s AND usuario_id = %s AND status = 'Resolvido'""",
+        (chamado_id, usuario_id),
+    )
+    if cursor.rowcount == 0:
+        cursor.close()
+        conn.close()
+        raise ValueError("A resolução não pode ser confirmada para este chamado.")
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def reabrir_chamado_usuario(chamado_id, usuario_id):
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute(
+        """UPDATE chamados
+           SET status = 'Em Andamento', resolvido_em = NULL
+           WHERE id = %s AND usuario_id = %s AND status = 'Resolvido'""",
+        (chamado_id, usuario_id),
+    )
+    if cursor.rowcount == 0:
+        cursor.close()
+        conn.close()
+        raise ValueError("A resolução não pode ser reaberta para este chamado.")
     conn.commit()
     cursor.close()
     conn.close()
@@ -380,6 +467,12 @@ def enviar_mensagem_chamado(chamado_id, autor_id, autor_nome, autor_papel, mensa
 
     cursor.close()
     conn.close()
+
+    if autor_papel == "analista" and chamado[0] == "Em Andamento":
+        atualizar_status_chamado(chamado_id, "Em Espera")
+    if autor_papel == "usuario" and chamado[0] == "Em Espera":
+        atualizar_status_chamado(chamado_id, "Em Andamento")
+
     return novo_id
 
 
