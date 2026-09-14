@@ -49,7 +49,7 @@ Resposta: {"categoria": "Hardware", "urgencia": "Alta", "tempo_sla_resposta": "1
 
 
 def classificar_chamado(titulo, descricao):
-    trechos = buscar_contexto(f"{titulo} {descricao}", top_k=3)
+    trechos = buscar_contexto(f"{titulo} {descricao}", top_k=2)
     contexto = "\n\n---\n\n".join(t["conteudo"] for t in trechos)
 
     prompt_usuario = f"""Contexto (base de conhecimento):
@@ -68,6 +68,7 @@ Classifique este chamado."""
             {"role": "user", "content": prompt_usuario},
         ],
         format="json",
+        options={"num_predict": 220},
     )
 
     texto_resposta = resposta["message"]["content"]
@@ -111,14 +112,13 @@ Classifique este chamado."""
     return resultado
 
 
-PROMPT_COLETA_TEMPLATE = """Você é um assistente de abertura de chamados de suporte técnico de TI,
-conversando diretamente com o usuário para entender o problema dele antes de abrir o chamado.
+PROMPT_COLETA_TEMPLATE = """Você é um assistente de suporte técnico de TI,
+conversando diretamente com o usuário para orientar dúvidas, resolver problemas simples ou abrir chamados.
 
 Seu trabalho é ANALISAR de verdade o que o usuário escreveu — não seguir um roteiro fixo de
-perguntas genéricas. Baseado no que ele já disse, identifique especificamente o que ainda falta
-saber para abrir um chamado completo e útil para quem for atender. Use o contexto abaixo (trechos
-da base de conhecimento da empresa) apenas como referência do tipo de detalhe que costuma importar
-para esse tipo de problema — não pergunte nada que não faça sentido pro que foi relatado.
+perguntas genéricas. Antes de fazer uma pergunta, avalie se já há informação suficiente para
+orientar o usuário, sugerir uma solução segura ou abrir um chamado útil. Use o contexto abaixo
+(trechos da base de conhecimento da empresa) somente como fonte para orientações e procedimentos.
 
 Contexto (base de conhecimento, para orientar quais detalhes são relevantes neste tipo de problema):
 {contexto}
@@ -131,10 +131,15 @@ Regras:
   sites ou sistemas não abrem, se é só wifi ou cabo também, se começou depois de alguma mudança.
   Se for sistema/software, peça a mensagem de erro exata e em que momento ela aparece.
 - Nunca repita uma pergunta sobre algo que o usuário já respondeu, mesmo que indiretamente.
-- Faça UMA pergunta por vez, curta, direta e em português.
-- Finalize assim que tiver informação suficiente para alguém entender e resolver o problema sem
-  precisar perguntar o básico de novo — não precisa ser exaustivo, use bom senso. Geralmente 2 a 4
-  perguntas bem direcionadas já bastam se forem as perguntas certas.
+- Faça UMA pergunta por vez, curta, direta e em português, somente se ela alterar a orientação,
+  a solução ou a abertura do chamado. Não peça dados administrativos, patrimônio, localização,
+  horário ou impacto se eles não forem necessários para a próxima ação.
+- Não faça perguntas apenas para completar uma lista. Se equipamento/sistema afetado e sintoma já
+  estiverem claros, ofereça a solução segura disponível ou finalize o chamado com o que já foi
+  informado. Para abrir chamado, localização e impacto são desejáveis, mas não bloqueiam a abertura
+  quando o relato já permite atendimento.
+- Faça no máximo DUAS perguntas de esclarecimento para o mesmo problema. A exceção é quando uma
+  informação adicional for indispensável para segurança ou para resolver uma contradição.
 
 Pensamento crítico (importante): não aceite automaticamente tudo que o usuário disser como verdade.
 Você é um analista, não um bajulador. Se algo que o usuário descrever for tecnicamente inconsistente,
@@ -150,10 +155,21 @@ improvável, questione educadamente antes de aceitar — não concorde só para 
 Seja respeitoso e nunca debochado ao questionar — o objetivo é chegar num chamado preciso, não
 "vencer" uma discussão com o usuário.
 
-Responda SEMPRE em JSON, sem nenhum texto fora do JSON, em um dos dois formatos:
+Responda SEMPRE em JSON, sem nenhum texto fora do JSON, em um dos quatro formatos:
+
+Se for uma dúvida/orientação sem falha a ser atendida, responda de forma curta e somente com base
+no contexto. Não abra chamado:
+{{"acao": "orientar", "mensagem": "orientação objetiva para o usuário"}}
 
 Se ainda precisar perguntar algo (inclusive para esclarecer uma inconsistência):
 {{"acao": "perguntar", "mensagem": "sua pergunta aqui"}}
+
+Se os dados já forem suficientes e o contexto trouxer uma orientação segura, concreta e
+aplicável para a situação relatada, apresente a solução antes de propor a abertura de
+chamado. Só use esta ação quando a solução estiver fundamentada no contexto fornecido;
+não invente procedimentos, permissões ou diagnósticos. A solução deve ser curta, ter
+passos numerados e, quando existir no contexto, incluir cuidados importantes:
+{{"acao": "solucionar", "mensagem": "orientação curta para o usuário", "solucao": "1. Primeiro passo\\n2. Segundo passo", "titulo": "título curto do chamado (até 8 palavras)", "descricao": "descrição completa e organizada do problema, reunindo todos os detalhes específicos coletados na conversa"}}
 
 Se já tiver informação suficiente para abrir o chamado:
 {{"acao": "finalizar", "titulo": "título curto do chamado (até 8 palavras)", "descricao": "descrição completa e organizada do problema, reunindo todos os detalhes específicos coletados na conversa"}}
@@ -163,22 +179,93 @@ Exemplo de resposta ao perguntar (siga esse formato SEMPRE, nunca escreva a perg
 """
 
 
-def conversar_coleta(historico, forcar_finalizar=False):
+PROMPT_INTENCAO = """Você é o ponto inicial de atendimento de uma central de suporte de TI.
+Classifique somente a última mensagem do usuário em uma destas intenções:
+
+- "duvida": a pessoa quer uma orientação, explicação, instrução ou confirmação e não
+  relata uma falha que precise de atendimento.
+- "problema": a pessoa relata uma falha, indisponibilidade, erro, solicitação de reparo
+  ou qualquer situação que possa exigir abertura de chamado.
+
+Considere o significado da mensagem, não apenas a presença de uma interrogação. Quando
+houver dúvida razoável, escolha "problema" para que a central colete os dados necessários.
+
+Responda APENAS com JSON válido neste formato:
+{{"intencao": "duvida|problema"}}
+"""
+
+
+PROMPT_RESPOSTA_DUVIDA = """Você é um assistente de suporte de TI. Responda à dúvida do usuário
+de modo curto, objetivo e em português, usando exclusivamente o contexto fornecido quando
+ele trouxer uma orientação específica. Não invente procedimentos, permissões ou políticas.
+Se o contexto não for suficiente, explique isso e peça um detalhe que permita orientar melhor.
+Não abra chamado e não diga que ele foi aberto.
+"""
+
+
+def _intencao_por_fallback(mensagem):
+    """Retorna uma classificação conservadora se o modelo não responder em JSON válido."""
+    texto = mensagem.lower().strip()
+    marcadores_problema = (
+        "não consigo", "nao consigo", "não funciona", "nao funciona", "erro",
+        "parou", "falha", "caiu", "bloqueado", "lento", "problema", "sem acesso",
+    )
+    if any(marcador in texto for marcador in marcadores_problema):
+        return "problema"
+    return "duvida" if "?" in texto else "problema"
+
+
+def identificar_intencao(mensagem):
+    """Classifica a mensagem inicial como dúvida ou problema para direcionar o atendimento."""
+    resposta = ollama.chat(
+        model=MODELO,
+        messages=[
+            {"role": "system", "content": PROMPT_INTENCAO},
+            {"role": "user", "content": mensagem},
+        ],
+        format="json",
+    )
+    resultado = _extrair_json(resposta["message"]["content"])
+    intencao = (resultado or {}).get("intencao", "").lower().strip()
+    if intencao not in {"duvida", "problema"}:
+        intencao = _intencao_por_fallback(mensagem)
+    return intencao
+
+
+def responder_duvida(mensagem):
+    """Busca a base de conhecimento e responde sem iniciar uma abertura de chamado."""
+    trechos = buscar_contexto(mensagem, top_k=3)
+    contexto = "\n\n---\n\n".join(t["conteudo"] for t in trechos)
+    if not contexto:
+        contexto = "(Não há orientação específica na base de conhecimento.)"
+
+    resposta = ollama.chat(
+        model=MODELO,
+        messages=[
+            {"role": "system", "content": PROMPT_RESPOSTA_DUVIDA},
+            {"role": "user", "content": f"Contexto:\n{contexto}\n\nDúvida do usuário:\n{mensagem}"},
+        ],
+    )
+    texto = resposta["message"]["content"].strip()
+    return texto or "Não consegui elaborar uma orientação agora. Pode reformular sua dúvida?"
+
+
+def conversar_coleta(historico):
     texto_usuario_ate_agora = " ".join(m["content"] for m in historico if m["role"] == "user")
-    trechos = buscar_contexto(texto_usuario_ate_agora, top_k=3) if texto_usuario_ate_agora else []
+    # Um artigo mais aderente costuma conter o procedimento completo; limitar o
+    # contexto evita atrasar cada turno com conteúdo que não muda a decisão.
+    trechos = buscar_contexto(texto_usuario_ate_agora, top_k=1) if texto_usuario_ate_agora else []
     contexto = "\n\n---\n\n".join(t["conteudo"] for t in trechos) if trechos else "(nenhum contexto específico ainda)"
 
     prompt_sistema = PROMPT_COLETA_TEMPLATE.format(contexto=contexto)
     mensagens = [{"role": "system", "content": prompt_sistema}] + historico
 
-    if forcar_finalizar:
-        mensagens.append({
-            "role": "system",
-            "content": "Finalize AGORA a coleta com as informações que você já tem, "
-                       "mesmo que incompletas. Responda apenas com o JSON de finalizar."
-        })
-
-    resposta = ollama.chat(model=MODELO, messages=mensagens, format="json")
+    resposta = ollama.chat(
+        model=MODELO,
+        messages=mensagens,
+        format="json",
+        options={"num_predict": 280},
+    )
     texto_resposta = resposta["message"]["content"]
 
     resultado = _extrair_json(texto_resposta)
@@ -186,20 +273,20 @@ def conversar_coleta(historico, forcar_finalizar=False):
     if resultado is None:
         print("Aviso: coleta não devolveu JSON válido. Resposta bruta:")
         print(texto_resposta)
-        if forcar_finalizar:
-            mensagens_usuario = [m["content"] for m in historico if m["role"] == "user"]
-            resultado = {
-                "acao": "finalizar",
-                "titulo": (mensagens_usuario[0][:60] if mensagens_usuario else "Chamado sem título"),
-                "descricao": " ".join(mensagens_usuario) or texto_resposta.strip(),
-            }
-        else:
-            resultado = {"acao": "perguntar", "mensagem": texto_resposta.strip()}
+        resultado = {"acao": "perguntar", "mensagem": texto_resposta.strip()}
 
     resultado.setdefault("acao", "perguntar")
-    if resultado["acao"] == "finalizar":
+    if resultado["acao"] not in {"orientar", "perguntar", "solucionar", "finalizar"}:
+        resultado["acao"] = "perguntar"
+
+    if resultado["acao"] in {"solucionar", "finalizar"}:
         resultado.setdefault("titulo", "Chamado sem título definido")
         resultado.setdefault("descricao", " ".join(m["content"] for m in historico if m["role"] == "user"))
+    if resultado["acao"] == "solucionar":
+        resultado.setdefault("mensagem", "Com os dados informados, encontrei uma orientação que pode resolver o problema.")
+        resultado.setdefault("solucao", "Não foi possível detalhar uma solução segura. Você pode abrir um chamado para atendimento.")
+    elif resultado["acao"] == "orientar":
+        resultado.setdefault("mensagem", "Não encontrei uma orientação específica. Pode explicar um pouco mais o que precisa?")
     else:
         resultado.setdefault("mensagem", "Pode detalhar um pouco mais o problema?")
 

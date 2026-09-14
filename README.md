@@ -46,8 +46,15 @@ usuários, chamados, mensagens, anexos e pesquisas de satisfação.
 
 ## Fluxo implementado
 
-- Usuário: consulta o portal de artigos, conversa com a IA para coleta e
-  classificação do chamado, acompanha o histórico, comenta/anexa arquivos,
+- Usuário: consulta a Central de ajuda e inicia a conversa com uma mensagem
+  livre. A IA classifica a intenção: responde dúvidas com apoio da base de
+  conhecimento ou inicia a coleta de dados quando identifica um problema.
+  A cada mensagem, uma única análise decide se é necessário perguntar, orientar,
+  sugerir solução ou preparar o chamado. Quando a base trouxer um procedimento
+  aplicável, a IA apresenta uma solução segura ao usuário antes da abertura e registra
+  o resultado informado. Caso a orientação não resolva, o usuário revisa os dados e
+  confirma a abertura do chamado;
+  também pode iniciar uma nova conversa a qualquer momento. O usuário acompanha o histórico, comenta/anexa arquivos,
   cancela chamados ativos e avalia chamados fechados.
 - Analista: visualiza a fila com chamados críticos priorizados, assume o
   atendimento, atualiza o status (`Novo`, `Em Andamento`, `Em Espera`,

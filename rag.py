@@ -99,10 +99,10 @@ def carregar_base():
     if _trechos:
         textos = [t["texto_embedding"] for t in _trechos]
         _vetores = _modelo_embeddings.encode(textos)
-        print(f"Base de conhecimento carregada: {len(_artigos)} artigo(s), {len(_trechos)} trecho(s) indexados.")
+        print(f"Base de conhecimento carregada: {len(_artigos)} orientação(ões), {len(_trechos)} trecho(s) indexados.")
     else:
         _vetores = None
-        print("Nenhum artigo .md encontrado em base_conhecimento/.")
+        print("Nenhuma orientação .md encontrada em base_conhecimento/.")
 
 
 def _similaridade_cosseno(a, b):

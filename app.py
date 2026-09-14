@@ -3,7 +3,9 @@ import streamlit as st
 from datetime import datetime
 from pathlib import Path
 
-from ia_engine import classificar_chamado, conversar_coleta
+from ia_engine import (
+    classificar_chamado, conversar_coleta,
+)
 from rag import listar_artigos
 import sla
 from database import (
@@ -18,6 +20,8 @@ from database import (
     criar_tabela_anexos, salvar_anexo_chamado, listar_anexos_chamado,
     criar_tabela_pesquisas_satisfacao, buscar_pesquisa_satisfacao,
     salvar_pesquisa_satisfacao,
+    criar_tabela_atendimentos_ia, salvar_atendimento_ia,
+    registrar_resultado_atendimento_ia,
     cancelar_chamado_sem_atribuicao,
     confirmar_resolucao_usuario,
     reabrir_chamado_usuario,
@@ -41,6 +45,7 @@ criar_tabela_mensagens()
 criar_tabela_codigos()
 criar_tabela_anexos()
 criar_tabela_pesquisas_satisfacao()
+criar_tabela_atendimentos_ia()
 
 
 STATUS_OPCOES = ["Novo", "Em Andamento", "Em Espera", "Resolvido", "Fechado"]
@@ -415,7 +420,7 @@ def tela_esqueci_senha_confirmar():
 def sair():
     st.session_state.usuario_logado = None
     for chave in (
-        "chat_mensagens", "chat_turnos_usuario", "chat_resultado_final",
+        "chat_mensagens", "chat_turnos_usuario", "chat_resultado_final", "chat_etapa",
         "chamado_aberto_usuario", "chamado_selecionado_analista",
         "chamado_selecionado_historico", "chamado_selecionado_cancelado",
     ):
@@ -516,17 +521,17 @@ def painel_pesquisa_satisfacao(chamado):
 
 
 def _aba_portal_conhecimento():
-    st.caption("Consulte artigos e orientações antes de abrir um chamado. Talvez você consiga resolver aqui mesmo.")
+    st.caption("Consulte as orientações disponíveis antes de abrir um chamado. Talvez você consiga resolver aqui mesmo.")
 
     artigos = listar_artigos()
     if not artigos:
-        st.info("A base de conhecimento ainda não possui artigos publicados.")
+        st.info("A Central de ajuda ainda não possui orientações disponíveis.")
         return
 
     col_busca, col_categoria = st.columns([2.4, 1])
     with col_busca:
         termo_busca = st.text_input(
-            "🔍 Pesquisar artigo",
+            "🔍 Pesquisar orientação",
             placeholder="Ex.: senha bloqueada, impressora, wi-fi, e-mail não envia...",
             key="busca_portal_artigos",
         ).strip().lower()
@@ -550,10 +555,10 @@ def _aba_portal_conhecimento():
 
     artigos_filtrados = [a for a in artigos if _artigo_corresponde(a)]
 
-    st.caption(f"{len(artigos_filtrados)} de {len(artigos)} artigo(s)")
+    st.caption(f"{len(artigos_filtrados)} de {len(artigos)} orientação(ões)")
 
     if not artigos_filtrados:
-        st.warning("Nenhum artigo encontrado para essa busca. Tente outro termo ou abra um chamado na aba ao lado.")
+        st.warning("Nenhuma orientação encontrada para essa busca. Tente outro termo ou abra um chamado na aba ao lado.")
         return
 
     for artigo in artigos_filtrados:
@@ -574,7 +579,7 @@ def tela_usuario(usuario):
     injetar_css()
     cabecalho("Central de Chamados", f"Bem-vindo(a), {usuario['nome']}", "🎫")
 
-    aba_portal, aba_chat, aba_chamados = st.tabs(["Portal de artigos", "Abrir novo chamado", "Meus chamados"])
+    aba_portal, aba_chat, aba_chamados = st.tabs(["Central de ajuda", "Abrir novo chamado", "Meus chamados"])
 
     with aba_portal:
         _aba_portal_conhecimento()
@@ -595,18 +600,20 @@ def tela_usuario(usuario):
 
 
 def _aba_abrir_chamado(usuario):
-    st.caption("Converse com a IA descrevendo o problema — ela vai fazer algumas perguntas e, ao final, abrir o chamado automaticamente.")
+    st.caption("Envie sua mensagem. A IA analisa o caso em uma única etapa, pergunta apenas o necessário e sugere uma solução segura quando possível.")
 
     if "chat_mensagens" not in st.session_state:
         st.session_state.chat_mensagens = [
-            {"role": "assistant", "content": "Olá! Descreva o problema que você está enfrentando."}
+            {"role": "assistant", "content": "Olá! Como posso ajudar? Você pode tirar uma dúvida ou descrever um problema."}
         ]
-    if "chat_turnos_usuario" not in st.session_state:
-        st.session_state.chat_turnos_usuario = 0
     if "chat_resultado_final" not in st.session_state:
         st.session_state.chat_resultado_final = None
 
-    MAX_TURNOS = 4
+    def reiniciar_conversa():
+        st.session_state.chat_mensagens = [
+            {"role": "assistant", "content": "Olá! Como posso ajudar? Você pode tirar uma dúvida ou descrever um problema."}
+        ]
+        st.session_state.chat_resultado_final = None
 
     with st.container(border=True):
         for msg in st.session_state.chat_mensagens:
@@ -617,59 +624,137 @@ def _aba_abrir_chamado(usuario):
             entrada = st.chat_input("Digite sua resposta...")
             if entrada:
                 st.session_state.chat_mensagens.append({"role": "user", "content": entrada})
-                st.session_state.chat_turnos_usuario += 1
 
                 with st.spinner("A IA está processando..."):
-                    forcar = st.session_state.chat_turnos_usuario >= MAX_TURNOS
-                    resultado = conversar_coleta(st.session_state.chat_mensagens, forcar_finalizar=forcar)
+                    resultado = conversar_coleta(st.session_state.chat_mensagens)
 
-                if resultado["acao"] == "perguntar":
+                if resultado["acao"] in {"orientar", "perguntar"}:
                     st.session_state.chat_mensagens.append({"role": "assistant", "content": resultado["mensagem"]})
+                    st.rerun()
+                elif resultado["acao"] == "solucionar":
+                    atendimento_ia_id = salvar_atendimento_ia(
+                        usuario["id"], resultado["titulo"], resultado["descricao"], resultado["solucao"],
+                    )
+                    st.session_state.chat_mensagens.append({"role": "assistant", "content": resultado["mensagem"]})
+                    st.session_state.chat_resultado_final = {
+                        "status": "solucao_sugerida",
+                        "atendimento_ia_id": atendimento_ia_id,
+                        "titulo": resultado["titulo"],
+                        "descricao": resultado["descricao"],
+                        "solucao": resultado["solucao"],
+                    }
                     st.rerun()
                 else:
                     st.session_state.chat_mensagens.append({
                         "role": "assistant",
-                        "content": f"Entendi! Vou abrir o chamado: **{resultado['titulo']}**"
+                        "content": "Preparei os dados do chamado. Revise-os abaixo e confirme a abertura quando estiver tudo correto."
                     })
-                    with st.spinner("Classificando e registrando o chamado..."):
-                        classificacao = classificar_chamado(resultado["titulo"], resultado["descricao"])
-                        titulo_final = classificacao.get("titulo_resumido") or resultado["titulo"]
-                        descricao_final = classificacao.get("descricao_padronizada") or resultado["descricao"]
-                        chamado_id = salvar_chamado(
-                            titulo=titulo_final,
-                            descricao=descricao_final,
-                            categoria=classificacao.get("categoria"),
-                            urgencia=classificacao.get("urgencia"),
-                            sla_resposta=classificacao.get("tempo_sla_resposta"),
-                            sla_resolucao=classificacao.get("tempo_sla_resolucao"),
-                            equipe_destino=classificacao.get("equipe_destino"),
-                            confiabilidade=classificacao.get("confiabilidade"),
-                            usuario_id=usuario["id"],
-                        )
-                    st.session_state.chat_resultado_final = {"id": chamado_id, **classificacao}
+                    st.session_state.chat_resultado_final = {
+                        "status": "aguardando_confirmacao",
+                        "titulo": resultado["titulo"],
+                        "descricao": resultado["descricao"],
+                    }
                     st.rerun()
 
         else:
             resultado = st.session_state.chat_resultado_final
-            st.success(f"Chamado #{resultado['id']} registrado com sucesso!")
+            if resultado.get("status") == "solucao_sugerida":
+                st.success("Encontrei uma possível solução com base nos dados informados.")
+                st.markdown("##### Solução sugerida")
+                st.markdown(resultado["solucao"])
+                st.caption("Siga apenas os passos indicados. Se não resolver, você poderá abrir o chamado com os dados já coletados.")
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Categoria", resultado.get("categoria", "N/A"))
-                st.metric("Urgência", resultado.get("urgencia", "N/A"))
-                st.metric("Equipe destino", resultado.get("equipe_destino", "N/A"))
-            with col2:
-                st.metric("SLA de resposta", resultado.get("tempo_sla_resposta", "N/A"))
-                st.metric("SLA de resolução", resultado.get("tempo_sla_resolucao", "N/A"))
-                st.metric("Confiabilidade (IA)", resultado.get("confiabilidade", "N/A"))
+                col_resolvido, col_abrir = st.columns(2)
+                with col_resolvido:
+                    resolvido = st.button("A solução resolveu o problema", type="primary", use_container_width=True)
+                with col_abrir:
+                    abrir_chamado = st.button("Não resolveu — abrir chamado", use_container_width=True)
 
-            if st.button("Abrir novo chamado", type="primary"):
-                st.session_state.chat_mensagens = [
-                    {"role": "assistant", "content": "Olá! Descreva o problema que você está enfrentando."}
-                ]
-                st.session_state.chat_turnos_usuario = 0
-                st.session_state.chat_resultado_final = None
-                st.rerun()
+                if resolvido:
+                    registrar_resultado_atendimento_ia(resultado["atendimento_ia_id"], "Resolvido")
+                    st.session_state.chat_mensagens.append({
+                        "role": "assistant",
+                        "content": "Ótimo! Fico feliz que o problema tenha sido resolvido."
+                    })
+                    st.session_state.chat_resultado_final = {"status": "resolvido_pelo_usuario"}
+                    st.rerun()
+                if abrir_chamado:
+                    registrar_resultado_atendimento_ia(resultado["atendimento_ia_id"], "Nao resolvido")
+                    st.session_state.chat_resultado_final = {
+                        "status": "aguardando_confirmacao",
+                        "atendimento_ia_id": resultado["atendimento_ia_id"],
+                        "titulo": resultado["titulo"],
+                        "descricao": resultado["descricao"],
+                    }
+                    st.rerun()
+
+            elif resultado.get("status") == "aguardando_confirmacao":
+                st.info("Confira ou ajuste os dados. O chamado só será aberto após sua confirmação.")
+                with st.form("form_confirmar_abertura"):
+                    titulo = st.text_input("Título", value=resultado["titulo"], max_chars=255)
+                    descricao = st.text_area("Descrição", value=resultado["descricao"], height=180)
+                    confirmar = st.form_submit_button("Confirmar e abrir chamado", type="primary")
+
+                _, col_nova = st.columns(2)
+                with col_nova:
+                    nova_conversa = st.button("Iniciar nova conversa", use_container_width=True)
+
+                if confirmar:
+                    if not titulo.strip() or not descricao.strip():
+                        st.error("Preencha o título e a descrição antes de abrir o chamado.")
+                    else:
+                        with st.spinner("Classificando e abrindo o chamado..."):
+                            classificacao = classificar_chamado(titulo.strip(), descricao.strip())
+                            chamado_id = salvar_chamado(
+                                titulo=classificacao.get("titulo_resumido") or titulo.strip(),
+                                descricao=classificacao.get("descricao_padronizada") or descricao.strip(),
+                                categoria=classificacao.get("categoria"),
+                                urgencia=classificacao.get("urgencia"),
+                                sla_resposta=classificacao.get("tempo_sla_resposta"),
+                                sla_resolucao=classificacao.get("tempo_sla_resolucao"),
+                                equipe_destino=classificacao.get("equipe_destino"),
+                                confiabilidade=classificacao.get("confiabilidade"),
+                                usuario_id=usuario["id"],
+                            )
+                            if resultado.get("atendimento_ia_id"):
+                                registrar_resultado_atendimento_ia(
+                                    resultado["atendimento_ia_id"], "Nao resolvido", chamado_id,
+                                )
+                        st.session_state.chat_resultado_final = {
+                            "status": "registrado", "id": chamado_id, **classificacao,
+                        }
+                        st.rerun()
+                if nova_conversa:
+                    reiniciar_conversa()
+                    st.rerun()
+
+            elif resultado.get("status") == "registrado":
+                st.success(f"Chamado #{resultado['id']} registrado com sucesso!")
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Categoria", resultado.get("categoria", "N/A"))
+                    st.metric("Urgência", resultado.get("urgencia", "N/A"))
+                    st.metric("Equipe destino", resultado.get("equipe_destino", "N/A"))
+                with col2:
+                    st.metric("SLA de resposta", resultado.get("tempo_sla_resposta", "N/A"))
+                    st.metric("SLA de resolução", resultado.get("tempo_sla_resolucao", "N/A"))
+                    st.metric("Confiabilidade (IA)", resultado.get("confiabilidade", "N/A"))
+
+                if st.button("Iniciar nova conversa", type="primary"):
+                    reiniciar_conversa()
+                    st.rerun()
+
+            else:
+                st.success("Problema resolvido sem necessidade de abrir chamado.")
+                if st.button("Iniciar nova conversa", type="primary"):
+                    reiniciar_conversa()
+                    st.rerun()
+
+    if st.session_state.chat_resultado_final is None:
+        if st.button("Iniciar nova conversa", key="nova_conversa_durante_atendimento"):
+            reiniciar_conversa()
+            st.rerun()
 
 
 def _aba_meus_chamados(usuario, grupo):

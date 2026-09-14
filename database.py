@@ -575,6 +575,68 @@ def salvar_pesquisa_satisfacao(chamado_id, nota, comentario):
     conn.close()
 
 
+def criar_tabela_atendimentos_ia():
+    """Registra soluções de autoatendimento apresentadas pela IA para auditoria e métricas."""
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS atendimentos_ia (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            usuario_id INT NULL,
+            chamado_id INT NULL,
+            titulo VARCHAR(255) NOT NULL,
+            descricao TEXT NOT NULL,
+            solucao TEXT NOT NULL,
+            resultado VARCHAR(30) NOT NULL DEFAULT 'Pendente',
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            respondido_em DATETIME NULL,
+            CONSTRAINT fk_atendimentos_ia_usuario FOREIGN KEY (usuario_id)
+                REFERENCES usuarios(id) ON DELETE SET NULL,
+            CONSTRAINT fk_atendimentos_ia_chamado FOREIGN KEY (chamado_id)
+                REFERENCES chamados(id) ON DELETE SET NULL
+        )
+    """)
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def salvar_atendimento_ia(usuario_id, titulo, descricao, solucao):
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute(
+        """INSERT INTO atendimentos_ia (usuario_id, titulo, descricao, solucao)
+           VALUES (%s, %s, %s, %s)""",
+        (usuario_id, titulo, descricao, solucao),
+    )
+    conn.commit()
+    atendimento_id = cursor.lastrowid
+    cursor.close()
+    conn.close()
+    return atendimento_id
+
+
+def registrar_resultado_atendimento_ia(atendimento_id, resultado, chamado_id=None):
+    if resultado not in {"Resolvido", "Nao resolvido"}:
+        raise ValueError("Resultado de atendimento IA inválido.")
+
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute(
+        """UPDATE atendimentos_ia
+           SET resultado = %s, chamado_id = %s, respondido_em = %s
+           WHERE id = %s""",
+        (resultado, chamado_id, datetime.now(), atendimento_id),
+    )
+    if cursor.rowcount == 0:
+        cursor.close()
+        conn.close()
+        raise ValueError("Atendimento de IA não encontrado.")
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
 def criar_usuario(nome, email, senha_hash, papel):
     conn = conectar()
     cursor = conn.cursor()
