@@ -4,7 +4,8 @@ sentence-transformers
 numpy
 python-dotenv
 streamlit
+pandas
+matplotlib
 bcrypt
 pyotp
 qrcode[pil]
- 

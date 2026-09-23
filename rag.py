@@ -1,7 +1,12 @@
 import os
 import re
+import logging
 import numpy as np
 from sentence_transformers import SentenceTransformer
+
+from observability import configurar_logging
+
+logger = logging.getLogger(__name__)
 
 PASTA_BASE = os.path.join(os.path.dirname(__file__), "base_conhecimento")
 
@@ -54,7 +59,7 @@ def carregar_base():
     _artigos = {}
 
     if not os.path.isdir(PASTA_BASE):
-        print("Pasta base_conhecimento/ não encontrada.")
+        logger.warning("Base de conhecimento não encontrada: %s", PASTA_BASE)
         return
 
     for nome_arquivo in sorted(os.listdir(PASTA_BASE)):
@@ -98,11 +103,11 @@ def carregar_base():
 
     if _trechos:
         textos = [t["texto_embedding"] for t in _trechos]
-        _vetores = _modelo_embeddings.encode(textos)
-        print(f"Base de conhecimento carregada: {len(_artigos)} orientação(ões), {len(_trechos)} trecho(s) indexados.")
+        _vetores = _modelo_embeddings.encode(textos, show_progress_bar=False)
+        logger.info("Base indexada: %d orientações e %d trechos.", len(_artigos), len(_trechos))
     else:
         _vetores = None
-        print("Nenhuma orientação .md encontrada em base_conhecimento/.")
+        logger.warning("Nenhuma orientação .md encontrada na base de conhecimento.")
 
 
 def _similaridade_cosseno(a, b):
@@ -156,9 +161,9 @@ def listar_artigos():
 
 
 if __name__ == "__main__":
+    configurar_logging()
     carregar_base()
     exemplo = "não consigo acessar a internet no meu computador"
     resultados = buscar_contexto(exemplo)
     for r in resultados:
-        print(f"\nArquivo: {r['arquivo']} — {r['titulo']} (similaridade: {r['similaridade']:.2f})")
-        print(r["conteudo"][:150], "...")
+        logger.info("Resultado: %s (%s, similaridade %.2f)", r["titulo"], r["arquivo"], r["similaridade"])

@@ -1,9 +1,14 @@
 import os
+import logging
+import json
 from datetime import datetime
 import mysql.connector
 from dotenv import load_dotenv
 
 from sla import calcular_prazos
+from observability import configurar_logging
+
+logger = logging.getLogger(__name__)
 
 TRANSICOES_STATUS = {
     "Novo": ("Em Andamento",),
@@ -49,6 +54,114 @@ def _fk_existe(cursor, tabela, nome_fk):
     return cursor.fetchone()[0] > 0
 
 
+def _trigger_existe(cursor, nome_trigger):
+    cursor.execute(
+        """SELECT COUNT(*) FROM information_schema.TRIGGERS
+           WHERE TRIGGER_SCHEMA = DATABASE() AND TRIGGER_NAME = %s""",
+        (nome_trigger,),
+    )
+    return cursor.fetchone()[0] > 0
+
+
+def _registrar_auditoria(cursor, usuario_id, acao, entidade, entidade_id=None,
+                         resultado="SUCESSO", detalhes=None):
+    """Registra metadados mínimos do evento; nunca inclua senhas, textos ou anexos."""
+    if resultado not in {"SUCESSO", "FALHA"}:
+        raise ValueError("Resultado de auditoria inválido.")
+    detalhes_json = json.dumps(detalhes, ensure_ascii=False) if detalhes else None
+    cursor.execute(
+        """INSERT INTO auditoria
+           (usuario_id, acao, entidade, entidade_id, resultado, detalhes)
+           VALUES (%s, %s, %s, %s, %s, %s)""",
+        (usuario_id, acao, entidade, entidade_id, resultado, detalhes_json),
+    )
+
+
+def registrar_auditoria(usuario_id, acao, entidade, entidade_id=None,
+                        resultado="SUCESSO", detalhes=None):
+    """Registra evento fora de uma operação de domínio, como login ou logout."""
+    conn = conectar()
+    cursor = conn.cursor()
+    try:
+        _registrar_auditoria(cursor, usuario_id, acao, entidade, entidade_id, resultado, detalhes)
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def registrar_login(usuario_id):
+    """Persiste o último acesso e a auditoria na mesma transação."""
+    conn = conectar()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("UPDATE usuarios SET ultimo_login_em = %s WHERE id = %s", (datetime.now(), usuario_id))
+        _registrar_auditoria(cursor, usuario_id, "LOGIN_REALIZADO", "sessao")
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def criar_tabela_auditoria():
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS auditoria (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            usuario_id INT NULL,
+            acao VARCHAR(80) NOT NULL,
+            entidade VARCHAR(40) NOT NULL,
+            entidade_id INT NULL,
+            resultado VARCHAR(10) NOT NULL,
+            detalhes JSON NULL,
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_auditoria_criado_em (criado_em),
+            INDEX idx_auditoria_usuario (usuario_id),
+            INDEX idx_auditoria_entidade (entidade, entidade_id)
+        )
+    """)
+    protecoes = {
+        "bloquear_update_auditoria": """
+            CREATE TRIGGER bloquear_update_auditoria
+            BEFORE UPDATE ON auditoria
+            FOR EACH ROW SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Registros de auditoria não podem ser alterados'
+        """,
+        "bloquear_delete_auditoria": """
+            CREATE TRIGGER bloquear_delete_auditoria
+            BEFORE DELETE ON auditoria
+            FOR EACH ROW SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Registros de auditoria não podem ser excluídos'
+        """,
+    }
+    for nome_trigger, comando in protecoes.items():
+        if not _trigger_existe(cursor, nome_trigger):
+            cursor.execute(comando)
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def listar_auditoria(limite=200, usuario_id=None):
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    consulta = """SELECT a.id, a.criado_em, a.usuario_id, a.acao, a.entidade,
+                         a.entidade_id, a.resultado, a.detalhes, u.nome AS nome_usuario
+                  FROM auditoria a
+                  LEFT JOIN usuarios u ON u.id = a.usuario_id"""
+    parametros = [limite]
+    if usuario_id is not None:
+        consulta += " WHERE a.usuario_id = %s"
+        parametros.insert(0, usuario_id)
+    consulta += " ORDER BY a.id DESC LIMIT %s"
+    cursor.execute(consulta, tuple(parametros))
+    eventos = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return eventos
+
+
 def criar_tabela_usuarios():
     conn = conectar()
     cursor = conn.cursor()
@@ -58,12 +171,17 @@ def criar_tabela_usuarios():
 
             -- Perfil
             nome VARCHAR(255) NOT NULL,
+            sobrenome VARCHAR(255) NULL,
             email VARCHAR(255) NOT NULL UNIQUE,
             papel VARCHAR(20) NOT NULL DEFAULT 'usuario',
+            telefone VARCHAR(30) NULL,
+            departamento VARCHAR(100) NULL,
+            cargo VARCHAR(100) NULL,
 
             -- Autenticação
             senha_hash VARCHAR(255) NOT NULL,
             totp_secret VARCHAR(64),
+            ultimo_login_em DATETIME NULL,
 
             criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -71,16 +189,25 @@ def criar_tabela_usuarios():
     conn.commit()
     cursor.close()
     conn.close()
-    print("Tabela 'usuarios' pronta.")
+    logger.debug("Tabela de usuários verificada.")
 
 
 def migrar_tabela_usuarios():
     conn = conectar()
     cursor = conn.cursor()
-    if not _coluna_existe(cursor, "usuarios", "totp_secret"):
-        cursor.execute("ALTER TABLE usuarios ADD COLUMN totp_secret VARCHAR(64)")
-        conn.commit()
-        print("Coluna 'totp_secret' adicionada.")
+    colunas_novas = {
+        "totp_secret": "VARCHAR(64)",
+        "ultimo_login_em": "DATETIME NULL",
+        "sobrenome": "VARCHAR(255) NULL",
+        "telefone": "VARCHAR(30) NULL",
+        "departamento": "VARCHAR(100) NULL",
+        "cargo": "VARCHAR(100) NULL",
+    }
+    for nome_coluna, tipo in colunas_novas.items():
+        if not _coluna_existe(cursor, "usuarios", nome_coluna):
+            cursor.execute(f"ALTER TABLE usuarios ADD COLUMN {nome_coluna} {tipo}")
+            conn.commit()
+            logger.info("Migração aplicada: coluna %s adicionada em usuários.", nome_coluna)
     cursor.close()
     conn.close()
 
@@ -131,7 +258,7 @@ def criar_tabela_chamados():
     conn.commit()
     cursor.close()
     conn.close()
-    print("Tabela 'chamados' pronta.")
+    logger.debug("Tabela de chamados verificada.")
 
 
 def migrar_tabela_chamados():
@@ -158,7 +285,7 @@ def migrar_tabela_chamados():
         if not _coluna_existe(cursor, "chamados", nome_coluna):
             cursor.execute(f"ALTER TABLE chamados ADD COLUMN {nome_coluna} {tipo}")
             conn.commit()
-            print(f"Coluna '{nome_coluna}' adicionada.")
+            logger.info("Migração aplicada: coluna %s adicionada em chamados.", nome_coluna)
 
     if _coluna_existe(cursor, "chamados", "titulo_resumido"):
         cursor.execute(
@@ -166,7 +293,7 @@ def migrar_tabela_chamados():
         )
         cursor.execute("ALTER TABLE chamados DROP COLUMN titulo_resumido")
         conn.commit()
-        print("Coluna 'titulo_resumido' consolidada em 'titulo' e removida.")
+        logger.info("Migração aplicada: titulo_resumido consolidada em titulo.")
 
     if _coluna_existe(cursor, "chamados", "descricao_padronizada"):
         cursor.execute(
@@ -174,7 +301,7 @@ def migrar_tabela_chamados():
         )
         cursor.execute("ALTER TABLE chamados DROP COLUMN descricao_padronizada")
         conn.commit()
-        print("Coluna 'descricao_padronizada' consolidada em 'descricao' e removida.")
+        logger.info("Migração aplicada: descricao_padronizada consolidada em descricao.")
 
     for nome_fk, coluna in (
         ("fk_chamados_usuario", "usuario_id"),
@@ -188,13 +315,9 @@ def migrar_tabela_chamados():
                         REFERENCES usuarios(id) ON DELETE SET NULL"""
                 )
                 conn.commit()
-                print(f"Chave estrangeira '{nome_fk}' adicionada.")
+                logger.info("Migração aplicada: chave estrangeira %s adicionada.", nome_fk)
             except mysql.connector.Error as erro:
-                print(
-                    f"Aviso: não foi possível adicionar '{nome_fk}' ({erro}). "
-                    "Provavelmente há usuario_id/analista_id órfãos (sem usuário "
-                    "correspondente); a tabela segue funcional sem essa FK."
-                )
+                logger.warning("Não foi possível criar a chave estrangeira %s: %s", nome_fk, erro)
 
     cursor.execute("UPDATE chamados SET status = 'Em Andamento' WHERE status = 'Em Aberto'")
     cursor.execute("UPDATE chamados SET status = 'Em Espera' WHERE status = 'Aguardando'")
@@ -203,7 +326,7 @@ def migrar_tabela_chamados():
 
     cursor.close()
     conn.close()
-    print("Tabela 'chamados' migrada/verificada.")
+    logger.debug("Migrações de chamados verificadas.")
 
 
 def salvar_chamado(titulo, descricao, categoria, urgencia, confiabilidade=None,
@@ -224,8 +347,12 @@ def salvar_chamado(titulo, descricao, categoria, urgencia, confiabilidade=None,
          sla_resposta, sla_resolucao, equipe_destino, usuario_id,
          criado_em, prazo_resposta, prazo_resolucao),
     )
-    conn.commit()
     novo_id = cursor.lastrowid
+    _registrar_auditoria(
+        cursor, usuario_id, "CHAMADO_ABERTO", "chamado", novo_id,
+        detalhes={"categoria": categoria, "urgencia": urgencia},
+    )
+    conn.commit()
     cursor.close()
     conn.close()
     return novo_id
@@ -272,7 +399,7 @@ def buscar_chamado_por_id(chamado_id):
     return resultado
 
 
-def atualizar_status_chamado(chamado_id, novo_status):
+def atualizar_status_chamado(chamado_id, novo_status, autor_id=None):
     agora = datetime.now()
 
     conn = conectar()
@@ -322,6 +449,10 @@ def atualizar_status_chamado(chamado_id, novo_status):
            WHERE id = %s""",
         (novo_status, pausado_em_novo, tempo_pausado_min_novo, resolvido_em_novo, chamado_id),
     )
+    _registrar_auditoria(
+        cursor, autor_id, "STATUS_ALTERADO", "chamado", chamado_id,
+        detalhes={"anterior": status_atual, "novo": novo_status},
+    )
     conn.commit()
     cursor.close()
     conn.close()
@@ -341,12 +472,16 @@ def atribuir_chamado(chamado_id, analista_id):
         cursor.close()
         conn.close()
         raise ValueError("Este chamado já foi atribuído ou não está mais disponível para atendimento.")
+    _registrar_auditoria(
+        cursor, analista_id, "CHAMADO_ATRIBUIDO", "chamado", chamado_id,
+        detalhes={"analista_id": analista_id, "status_anterior": "Novo", "status_novo": "Em Andamento"},
+    )
     conn.commit()
     cursor.close()
     conn.close()
 
 
-def cancelar_chamado_sem_atribuicao(chamado_id, motivo):
+def cancelar_chamado_sem_atribuicao(chamado_id, motivo, autor_id=None):
     if not motivo or not motivo.strip():
         raise ValueError("Informe o motivo do cancelamento.")
 
@@ -362,6 +497,10 @@ def cancelar_chamado_sem_atribuicao(chamado_id, motivo):
         cursor.close()
         conn.close()
         raise ValueError("O chamado não pode mais ser cancelado porque já foi atribuído ou saiu do status Novo.")
+    _registrar_auditoria(
+        cursor, autor_id, "CHAMADO_CANCELADO", "chamado", chamado_id,
+        detalhes={"status_anterior": "Novo"},
+    )
     conn.commit()
     cursor.close()
     conn.close()
@@ -380,6 +519,10 @@ def confirmar_resolucao_usuario(chamado_id, usuario_id):
         cursor.close()
         conn.close()
         raise ValueError("A resolução não pode ser confirmada para este chamado.")
+    _registrar_auditoria(
+        cursor, usuario_id, "RESOLUCAO_CONFIRMADA", "chamado", chamado_id,
+        detalhes={"status_anterior": "Resolvido", "status_novo": "Fechado"},
+    )
     conn.commit()
     cursor.close()
     conn.close()
@@ -398,6 +541,10 @@ def reabrir_chamado_usuario(chamado_id, usuario_id):
         cursor.close()
         conn.close()
         raise ValueError("A resolução não pode ser reaberta para este chamado.")
+    _registrar_auditoria(
+        cursor, usuario_id, "CHAMADO_REABERTO", "chamado", chamado_id,
+        detalhes={"status_anterior": "Resolvido", "status_novo": "Em Andamento"},
+    )
     conn.commit()
     cursor.close()
     conn.close()
@@ -421,7 +568,7 @@ def criar_tabela_mensagens():
     conn.commit()
     cursor.close()
     conn.close()
-    print("Tabela 'mensagens_chamado' pronta.")
+    logger.debug("Tabela de mensagens verificada.")
 
 
 def listar_mensagens_chamado(chamado_id):
@@ -455,23 +602,27 @@ def enviar_mensagem_chamado(chamado_id, autor_id, autor_nome, autor_papel, mensa
            VALUES (%s, %s, %s, %s, %s)""",
         (chamado_id, autor_id, autor_nome, autor_papel, mensagem),
     )
-    conn.commit()
     novo_id = cursor.lastrowid
+
+    _registrar_auditoria(
+        cursor, autor_id, "MENSAGEM_ENVIADA", "chamado", chamado_id,
+        detalhes={"mensagem_id": novo_id, "papel_autor": autor_papel},
+    )
 
     if autor_papel == "analista":
         cursor.execute(
             "UPDATE chamados SET primeira_resposta_em = COALESCE(primeira_resposta_em, %s) WHERE id = %s",
             (datetime.now(), chamado_id),
         )
-        conn.commit()
+    conn.commit()
 
     cursor.close()
     conn.close()
 
     if autor_papel == "analista" and chamado[0] == "Em Andamento":
-        atualizar_status_chamado(chamado_id, "Em Espera")
+        atualizar_status_chamado(chamado_id, "Em Espera", autor_id=autor_id)
     if autor_papel == "usuario" and chamado[0] == "Em Espera":
-        atualizar_status_chamado(chamado_id, "Em Andamento")
+        atualizar_status_chamado(chamado_id, "Em Andamento", autor_id=autor_id)
 
     return novo_id
 
@@ -515,6 +666,10 @@ def salvar_anexo_chamado(chamado_id, autor_id, nome_arquivo, tipo_arquivo, conte
            (chamado_id, autor_id, nome_arquivo, tipo_arquivo, conteudo)
            VALUES (%s, %s, %s, %s, %s)""",
         (chamado_id, autor_id, nome_arquivo, tipo_arquivo, conteudo),
+    )
+    _registrar_auditoria(
+        cursor, autor_id, "ANEXO_ADICIONADO", "chamado", chamado_id,
+        detalhes={"anexo_id": cursor.lastrowid, "tipo_arquivo": tipo_arquivo, "tamanho_bytes": len(conteudo)},
     )
     conn.commit()
     cursor.close()
@@ -563,20 +718,20 @@ def buscar_pesquisa_satisfacao(chamado_id):
     return resultado
 
 
-def salvar_pesquisa_satisfacao(chamado_id, nota, comentario):
+def salvar_pesquisa_satisfacao(chamado_id, nota, comentario, autor_id=None):
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO pesquisas_satisfacao (chamado_id, nota, comentario) VALUES (%s, %s, %s)",
         (chamado_id, nota, comentario),
     )
+    _registrar_auditoria(cursor, autor_id, "PESQUISA_RESPONDIDA", "chamado", chamado_id)
     conn.commit()
     cursor.close()
     conn.close()
 
 
 def criar_tabela_atendimentos_ia():
-    """Registra soluções de autoatendimento apresentadas pela IA para auditoria e métricas."""
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute("""
@@ -609,8 +764,9 @@ def salvar_atendimento_ia(usuario_id, titulo, descricao, solucao):
            VALUES (%s, %s, %s, %s)""",
         (usuario_id, titulo, descricao, solucao),
     )
-    conn.commit()
     atendimento_id = cursor.lastrowid
+    _registrar_auditoria(cursor, usuario_id, "ORIENTACAO_IA_APRESENTADA", "atendimento_ia", atendimento_id)
+    conn.commit()
     cursor.close()
     conn.close()
     return atendimento_id
@@ -632,20 +788,48 @@ def registrar_resultado_atendimento_ia(atendimento_id, resultado, chamado_id=Non
         cursor.close()
         conn.close()
         raise ValueError("Atendimento de IA não encontrado.")
+    _registrar_auditoria(
+        cursor, None, "RESULTADO_ORIENTACAO_IA", "atendimento_ia", atendimento_id,
+        detalhes={"resultado": resultado, "chamado_id": chamado_id},
+    )
     conn.commit()
     cursor.close()
     conn.close()
 
 
-def criar_usuario(nome, email, senha_hash, papel):
+def listar_atendimentos_ia(limite=5000):
+    """Retorna dados agregáveis das orientações da IA para os relatórios administrativos."""
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        """SELECT id, usuario_id, chamado_id, resultado, criado_em, respondido_em
+           FROM atendimentos_ia
+           ORDER BY criado_em DESC
+           LIMIT %s""",
+        (limite,),
+    )
+    resultados = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return resultados
+
+
+def criar_usuario(nome, email, senha_hash, papel, sobrenome=None, telefone=None,
+                  departamento=None, cargo=None, autor_id=None):
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO usuarios (nome, email, senha_hash, papel) VALUES (%s, %s, %s, %s)",
-        (nome, email, senha_hash, papel),
+        """INSERT INTO usuarios
+           (nome, sobrenome, email, senha_hash, papel, telefone, departamento, cargo)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+        (nome, sobrenome, email, senha_hash, papel, telefone, departamento, cargo),
+    )
+    novo_id = cursor.lastrowid
+    _registrar_auditoria(
+        cursor, autor_id, "USUARIO_CRIADO", "usuario", novo_id,
+        detalhes={"papel": papel},
     )
     conn.commit()
-    novo_id = cursor.lastrowid
     cursor.close()
     conn.close()
     return novo_id
@@ -664,7 +848,11 @@ def buscar_usuario_por_email(email):
 def listar_usuarios():
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT id, nome, email, papel, criado_em FROM usuarios ORDER BY criado_em DESC")
+    cursor.execute(
+        """SELECT id, nome, sobrenome, email, papel, telefone, departamento, cargo, criado_em,
+                  ultimo_login_em AS ultimo_login
+           FROM usuarios ORDER BY criado_em DESC"""
+    )
     resultados = cursor.fetchall()
     cursor.close()
     conn.close()
@@ -681,54 +869,66 @@ def buscar_usuario_por_id(usuario_id):
     return resultado
 
 
-def atualizar_usuario(usuario_id, nome, email, papel, senha_hash=None):
+def atualizar_usuario(usuario_id, nome, email, papel, senha_hash=None, sobrenome=None,
+                      telefone=None, departamento=None, cargo=None, autor_id=None):
     conn = conectar()
     cursor = conn.cursor()
     if senha_hash:
         cursor.execute(
-            "UPDATE usuarios SET nome = %s, email = %s, papel = %s, senha_hash = %s WHERE id = %s",
-            (nome, email, papel, senha_hash, usuario_id),
+            """UPDATE usuarios SET nome = %s, sobrenome = %s, email = %s, papel = %s,
+               telefone = %s, departamento = %s, cargo = %s, senha_hash = %s WHERE id = %s""",
+            (nome, sobrenome, email, papel, telefone, departamento, cargo, senha_hash, usuario_id),
         )
     else:
         cursor.execute(
-            "UPDATE usuarios SET nome = %s, email = %s, papel = %s WHERE id = %s",
-            (nome, email, papel, usuario_id),
+            """UPDATE usuarios SET nome = %s, sobrenome = %s, email = %s, papel = %s,
+               telefone = %s, departamento = %s, cargo = %s WHERE id = %s""",
+            (nome, sobrenome, email, papel, telefone, departamento, cargo, usuario_id),
+        )
+    linhas_afetadas = cursor.rowcount
+    if linhas_afetadas:
+        _registrar_auditoria(
+            cursor, autor_id, "USUARIO_ATUALIZADO", "usuario", usuario_id,
+            detalhes={"papel": papel, "senha_alterada": bool(senha_hash)},
         )
     conn.commit()
-    linhas_afetadas = cursor.rowcount
     cursor.close()
     conn.close()
     return linhas_afetadas
 
 
-def excluir_usuario(usuario_id):
+def excluir_usuario(usuario_id, autor_id=None):
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM usuarios WHERE id = %s", (usuario_id,))
-    conn.commit()
     linhas_afetadas = cursor.rowcount
+    if linhas_afetadas:
+        _registrar_auditoria(cursor, autor_id, "USUARIO_EXCLUIDO", "usuario", usuario_id)
+    conn.commit()
     cursor.close()
     conn.close()
     return linhas_afetadas
 
 
-def atualizar_senha(usuario_id, novo_hash_senha):
+def atualizar_senha(usuario_id, novo_hash_senha, autor_id=None):
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE usuarios SET senha_hash = %s WHERE id = %s", (novo_hash_senha, usuario_id)
     )
+    _registrar_auditoria(cursor, autor_id or usuario_id, "SENHA_ALTERADA", "usuario", usuario_id)
     conn.commit()
     cursor.close()
     conn.close()
 
 
-def salvar_totp_secret(usuario_id, secret):
+def salvar_totp_secret(usuario_id, secret, autor_id=None):
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE usuarios SET totp_secret = %s WHERE id = %s", (secret, usuario_id)
     )
+    _registrar_auditoria(cursor, autor_id or usuario_id, "TOTP_CONFIGURADO", "usuario", usuario_id)
     conn.commit()
     cursor.close()
     conn.close()
@@ -752,7 +952,7 @@ def criar_tabela_codigos():
     conn.commit()
     cursor.close()
     conn.close()
-    print("Tabela 'codigos_verificacao' pronta.")
+    logger.debug("Tabela de códigos de verificação verificada.")
 
 
 def salvar_codigo_verificacao(usuario_id, codigo, tipo, validade_minutos=10):
@@ -790,6 +990,7 @@ def verificar_codigo(usuario_id, codigo, tipo):
 
 
 if __name__ == "__main__":
+    configurar_logging()
     criar_tabela_usuarios()
     migrar_tabela_usuarios()
     criar_tabela_chamados()
@@ -798,3 +999,4 @@ if __name__ == "__main__":
     criar_tabela_mensagens()
     criar_tabela_anexos()
     criar_tabela_pesquisas_satisfacao()
+    criar_tabela_auditoria()

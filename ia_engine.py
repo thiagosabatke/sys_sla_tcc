@@ -1,8 +1,13 @@
 import os
 import json
+import logging
 import ollama
 from dotenv import load_dotenv
 from rag import buscar_contexto
+
+from observability import configurar_logging
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -77,8 +82,7 @@ Classifique este chamado."""
         resultado = json.loads(texto_resposta)
     except json.JSONDecodeError:
 
-        print("Aviso: o modelo não devolveu um JSON válido. Resposta bruta:")
-        print(texto_resposta)
+        logger.warning("Classificação da IA retornou JSON inválido; usando valores padrão.")
         resultado = {
             "categoria": "Outros",
             "urgencia": "Media",
@@ -105,7 +109,7 @@ Classifique este chamado."""
     }
     campos_faltando = [c for c in campos_padrao if c not in resultado]
     if campos_faltando:
-        print(f"Aviso: o modelo não preencheu os campos {campos_faltando}. Usando valores padrão.")
+        logger.warning("Classificação da IA incompleta (%s); aplicando valores padrão.", ", ".join(campos_faltando))
     for campo, valor_padrao in campos_padrao.items():
         resultado.setdefault(campo, valor_padrao)
 
@@ -204,7 +208,6 @@ Não abra chamado e não diga que ele foi aberto.
 
 
 def _intencao_por_fallback(mensagem):
-    """Retorna uma classificação conservadora se o modelo não responder em JSON válido."""
     texto = mensagem.lower().strip()
     marcadores_problema = (
         "não consigo", "nao consigo", "não funciona", "nao funciona", "erro",
@@ -216,7 +219,6 @@ def _intencao_por_fallback(mensagem):
 
 
 def identificar_intencao(mensagem):
-    """Classifica a mensagem inicial como dúvida ou problema para direcionar o atendimento."""
     resposta = ollama.chat(
         model=MODELO,
         messages=[
@@ -233,7 +235,6 @@ def identificar_intencao(mensagem):
 
 
 def responder_duvida(mensagem):
-    """Busca a base de conhecimento e responde sem iniciar uma abertura de chamado."""
     trechos = buscar_contexto(mensagem, top_k=3)
     contexto = "\n\n---\n\n".join(t["conteudo"] for t in trechos)
     if not contexto:
@@ -252,8 +253,6 @@ def responder_duvida(mensagem):
 
 def conversar_coleta(historico):
     texto_usuario_ate_agora = " ".join(m["content"] for m in historico if m["role"] == "user")
-    # Um artigo mais aderente costuma conter o procedimento completo; limitar o
-    # contexto evita atrasar cada turno com conteúdo que não muda a decisão.
     trechos = buscar_contexto(texto_usuario_ate_agora, top_k=1) if texto_usuario_ate_agora else []
     contexto = "\n\n---\n\n".join(t["conteudo"] for t in trechos) if trechos else "(nenhum contexto específico ainda)"
 
@@ -271,8 +270,7 @@ def conversar_coleta(historico):
     resultado = _extrair_json(texto_resposta)
 
     if resultado is None:
-        print("Aviso: coleta não devolveu JSON válido. Resposta bruta:")
-        print(texto_resposta)
+        logger.warning("Coleta da IA retornou JSON inválido; mantendo uma pergunta de esclarecimento.")
         resultado = {"acao": "perguntar", "mensagem": texto_resposta.strip()}
 
     resultado.setdefault("acao", "perguntar")
@@ -312,8 +310,12 @@ def _extrair_json(texto):
 
 
 if __name__ == "__main__":
+    configurar_logging()
     exemplo = classificar_chamado(
         titulo="Internet não funciona",
         descricao="não consigo acessar nenhum site desde hoje de manhã, o wifi conecta mas não navega",
     )
-    print(json.dumps(exemplo, indent=2, ensure_ascii=False))
+    logger.info(
+        "Classificação concluída: categoria=%s, urgência=%s, confiança=%s.",
+        exemplo["categoria"], exemplo["urgencia"], exemplo["confiabilidade"],
+    )

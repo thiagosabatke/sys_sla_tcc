@@ -1,7 +1,11 @@
 import os
 import smtplib
+import logging
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
+from observability import configurar_logging
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -25,6 +29,7 @@ def enviar_email(destinatario, assunto, corpo):
 
 
 if __name__ == "__main__":
+    configurar_logging()
     destino = input("Digite um e-mail para receber o teste: ")
     enviar_email(destino, "Teste - Sistema de Chamados", "Se você recebeu isso, o SMTP está funcionando.")
-    print("E-mail enviado (verifique a caixa de entrada e o spam).")
+    logger.info("E-mail de teste enviado; verifique a caixa de entrada e o spam.")

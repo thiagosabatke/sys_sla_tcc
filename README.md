@@ -35,6 +35,22 @@ python ia_engine.py     # testa a classificação completa (RAG + IA)
 python main.py           # roda o fluxo completo e grava no banco
 ```
 
+### Logs do terminal
+
+Os comandos exibem somente marcos de execução, como indexação da base, classificação,
+gravação de chamado, migrações aplicadas e avisos. Para diagnóstico detalhado no
+PowerShell, use `$env:LOG_LEVEL="DEBUG"; python main.py`; o nível padrão é `INFO`.
+Respostas brutas da IA e senhas não são enviadas ao terminal.
+
+### Auditoria e privacidade
+
+Na primeira execução, o sistema cria a tabela `auditoria`, que registra eventos de
+segurança e operações sem armazenar senhas, códigos 2FA, mensagens, anexos ou respostas
+brutas da IA. Administradores podem consultar os eventos na aba **Auditoria**.
+
+O aviso e os pontos organizacionais que precisam ser definidos antes de produção estão
+em [PRIVACIDADE.md](PRIVACIDADE.md).
+
 ### Executar a aplicação web
 
 ```bash
@@ -42,7 +58,7 @@ streamlit run app.py
 ```
 
 Na primeira execução, a aplicação cria/migra automaticamente as tabelas de
-usuários, chamados, mensagens, anexos e pesquisas de satisfação.
+usuários, chamados, mensagens, anexos, pesquisas de satisfação e auditoria.
 
 ## Fluxo implementado
 

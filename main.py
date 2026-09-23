@@ -1,23 +1,24 @@
 from ia_engine import classificar_chamado
-from database import salvar_chamado, criar_tabela_usuarios, criar_tabela_chamados
+from database import salvar_chamado, criar_tabela_usuarios, criar_tabela_chamados, criar_tabela_auditoria
+from observability import configurar_logging
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def abrir_chamado(titulo, descricao):
-    print(f"\n>>> Novo chamado: '{titulo}'")
+    logger.info("Iniciando classificação do chamado.")
 
     resultado = classificar_chamado(titulo, descricao)
 
     titulo_final = resultado.get("titulo_resumido") or titulo
     descricao_final = resultado.get("descricao_padronizada") or descricao
 
-    print(f"Categoria sugerida: {resultado.get('categoria', 'N/A')}")
-    print(f"Urgência sugerida: {resultado.get('urgencia', 'N/A')}")
-    print(f"SLA resposta: {resultado.get('tempo_sla_resposta', 'N/A')} | SLA resolução: {resultado.get('tempo_sla_resolucao', 'N/A')}")
-    print(f"Equipe destino: {resultado.get('equipe_destino', 'N/A')}")
-    print(f"Título final (IA): {titulo_final}")
-    print(f"Descrição final (IA): {descricao_final}")
-    print(f"Confiabilidade (autoavaliação da IA): {resultado.get('confiabilidade', 'N/A')}")
-    print(f"Arquivos consultados (RAG): {resultado.get('arquivos_consultados', [])}")
+    logger.info(
+        "Classificação concluída: categoria=%s, urgência=%s, equipe=%s, confiança=%s.",
+        resultado.get("categoria", "N/A"), resultado.get("urgencia", "N/A"),
+        resultado.get("equipe_destino", "N/A"), resultado.get("confiabilidade", "N/A"),
+    )
 
     chamado_id = salvar_chamado(
         titulo=titulo_final,
@@ -29,12 +30,14 @@ def abrir_chamado(titulo, descricao):
         equipe_destino=resultado.get("equipe_destino"),
         confiabilidade=resultado.get("confiabilidade"),
     )
-    print(f"Chamado salvo no banco com id {chamado_id}")
+    logger.info("Chamado #%s salvo no banco.", chamado_id)
 
 
 if __name__ == "__main__":
+    configurar_logging()
     criar_tabela_usuarios()
     criar_tabela_chamados()
+    criar_tabela_auditoria()
 
     abrir_chamado(
         titulo="Impressora não liga",
