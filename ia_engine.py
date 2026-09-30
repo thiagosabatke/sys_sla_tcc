@@ -13,6 +13,27 @@ load_dotenv()
 
 MODELO = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 
+
+def _montar_exemplos_few_shot(casos):
+    """Converte casos confirmados em exemplos para a classificação atual."""
+    if not casos:
+        return "(Nenhum caso validado semelhante foi recuperado.)"
+
+    exemplos = []
+    for posicao, caso in enumerate(casos, start=1):
+        problema = caso["conteudo"].split("\n", 1)[0].replace("Problema: ", "")
+        exemplos.append(
+            f"Exemplo validado {posicao}:\n"
+            f"Problema: {problema}\n"
+            f"Classificação inicial da IA: categoria={caso.get('categoria_ia') or 'não registrada'}, "
+            f"urgência={caso.get('urgencia_ia') or 'não registrada'}, "
+            f"equipe={caso.get('equipe_ia') or 'não registrada'}\n"
+            f"Classificação final validada: categoria={caso.get('categoria_final')}, "
+            f"urgência={caso.get('urgencia_final')}, equipe={caso.get('equipe_final')}\n"
+            f"Diagnóstico e solução: {caso['conteudo']}"
+        )
+    return "\n\n---\n\n".join(exemplos)
+
 PROMPT_SISTEMA = """Persona: Você é um Analista de Suporte de TI Sênior, especializado em ITIL 4,
 gerenciamento de incidentes e Processamento de Linguagem Natural.
 
@@ -56,9 +77,19 @@ Resposta: {"categoria": "Hardware", "urgencia": "Alta", "tempo_sla_resposta": "1
 def classificar_chamado(titulo, descricao):
     trechos = buscar_contexto(f"{titulo} {descricao}", top_k=2)
     contexto = "\n\n---\n\n".join(t["conteudo"] for t in trechos)
+    casos_semelhantes = buscar_contexto(
+        f"{titulo} {descricao}", top_k=2, tipo="caso_validado",
+    )
+    exemplos_few_shot = _montar_exemplos_few_shot(casos_semelhantes)
 
     prompt_usuario = f"""Contexto (base de conhecimento):
 {contexto}
+
+Casos validados recuperados como exemplos de classificação:
+{exemplos_few_shot}
+
+Use somente a classificação final validada dos exemplos como referência correta.
+A classificação inicial da IA é histórico e pode estar errada.
 
 Chamado do usuário:
 Título: {titulo}

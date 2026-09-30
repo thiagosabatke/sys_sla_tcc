@@ -13,8 +13,10 @@ import sla
 from database import (
     salvar_chamado, criar_tabela_usuarios, migrar_tabela_usuarios,
     criar_tabela_chamados, migrar_tabela_chamados, criar_tabela_mensagens,
+    criar_tabela_base_casos_ia, migrar_tabela_base_casos_ia,
     criar_tabela_codigos, listar_chamados, buscar_chamado_por_id,
     atualizar_status_chamado, atribuir_chamado, listar_mensagens_chamado,
+    registrar_resolucao_chamado,
     enviar_mensagem_chamado, listar_usuarios, criar_usuario,
     buscar_usuario_por_email, atualizar_senha, salvar_totp_secret,
     salvar_codigo_verificacao, verificar_codigo, buscar_usuario_por_id,
@@ -24,6 +26,7 @@ from database import (
     salvar_pesquisa_satisfacao,
     criar_tabela_atendimentos_ia, salvar_atendimento_ia,
     registrar_resultado_atendimento_ia, listar_atendimentos_ia,
+    listar_casos_base_ia,
     criar_tabela_auditoria, registrar_auditoria, registrar_login,
     cancelar_chamado_sem_atribuicao,
     confirmar_resolucao_usuario,
@@ -39,6 +42,8 @@ criar_tabela_usuarios()
 migrar_tabela_usuarios()
 criar_tabela_chamados()
 migrar_tabela_chamados()
+criar_tabela_base_casos_ia()
+migrar_tabela_base_casos_ia()
 criar_tabela_mensagens()
 criar_tabela_codigos()
 criar_tabela_anexos()
@@ -884,6 +889,10 @@ def _aba_meus_chamados(usuario, grupo):
         elif chamado["status"] == "Resolvido":
             st.divider()
             st.info("O analista marcou este chamado como resolvido. Confirme o resultado ou solicite a reabertura.")
+            if chamado.get("diagnostico_final"):
+                st.markdown("##### Diagnóstico e solução registrados")
+                st.write(f"**Diagnóstico:** {chamado['diagnostico_final']}")
+                st.write(f"**Solução:** {chamado.get('solucao_final') or 'Não informada'}")
             confirmar, reabrir = st.columns(2)
             with confirmar:
                 if st.button("Confirmar solução", type="primary", key=f"fechar_{chamado['id']}"):
@@ -1037,10 +1046,55 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
 
             if ja_atribuido_a_mim and chamado["status"] == "Em Andamento":
                 st.divider()
-                st.caption("Uma mensagem enviada ao solicitante coloca o chamado automaticamente em espera até a resposta dele.")
-                if st.button("Marcar como resolvido", type="primary", use_container_width=True):
+                st.caption("Registre a resolução para que o solicitante possa confirmar o resultado.")
+                with st.form(f"form_resolucao_{chamado['id']}"):
+                    st.markdown("##### Validar classificação da IA")
+                    st.caption(
+                        "Sugestão da IA: "
+                        f"{chamado.get('categoria_ia') or chamado.get('categoria') or '—'} · "
+                        f"{chamado.get('urgencia_ia') or chamado.get('urgencia') or '—'} · "
+                        f"{chamado.get('equipe_ia') or chamado.get('equipe_destino') or '—'}"
+                    )
+                    coluna_categoria, coluna_urgencia, coluna_equipe = st.columns(3)
+                    categorias = ["Acesso", "Software", "Hardware", "Rede", "Outros"]
+                    urgencias = ["Baixa", "Media", "Alta", "Critica"]
+                    equipes = ["Suporte", "Software", "Hardware", "Redes"]
+                    with coluna_categoria:
+                        categoria_final = st.selectbox(
+                            "Categoria final", categorias,
+                            index=categorias.index(chamado.get("categoria_ia") or chamado.get("categoria") or "Outros"),
+                        )
+                    with coluna_urgencia:
+                        urgencia_final = st.selectbox(
+                            "Urgência final", urgencias,
+                            index=urgencias.index(chamado.get("urgencia_ia") or chamado.get("urgencia") or "Media"),
+                        )
+                    with coluna_equipe:
+                        equipe_final = st.selectbox(
+                            "Equipe final", equipes,
+                            index=equipes.index(chamado.get("equipe_ia") or chamado.get("equipe_destino") or "Suporte"),
+                        )
+                    st.divider()
+                    diagnostico = st.text_area(
+                        "Diagnóstico identificado", height=100,
+                        placeholder="Ex.: A senha da conta havia expirado.",
+                    )
+                    solucao = st.text_area(
+                        "Solução aplicada", height=120,
+                        placeholder="Ex.: Senha redefinida e Outlook reconfigurado.",
+                    )
+                    compartilhar = st.checkbox(
+                        "Autorizar este caso confirmado como referência para a IA",
+                        value=True,
+                        help="O caso só será usado após a confirmação do solicitante.",
+                    )
+                    marcar_resolvido = st.form_submit_button("Registrar resolução", type="primary", use_container_width=True)
+                if marcar_resolvido:
                     try:
-                        atualizar_status_chamado(chamado["id"], "Resolvido", autor_id=usuario["id"])
+                        registrar_resolucao_chamado(
+                            chamado["id"], usuario["id"], diagnostico, solucao, compartilhar,
+                            categoria_final, urgencia_final, equipe_final,
+                        )
                         st.success("Aguardando a confirmação do solicitante.")
                     except ValueError as erro:
                         st.error(str(erro))
@@ -1178,6 +1232,11 @@ def _aba_historico_analista(usuario, chamados_todos):
                 f"Aberto em {sla.formatar_data(chamado.get('criado_em'))} · "
                 f"Resolvido em {sla.formatar_data(chamado.get('resolvido_em'))}"
             )
+            if chamado.get("diagnostico_final"):
+                st.divider()
+                st.markdown("##### Resolução técnica")
+                st.write(f"**Diagnóstico:** {chamado['diagnostico_final']}")
+                st.write(f"**Solução aplicada:** {chamado.get('solucao_final') or 'Não informada'}")
 
         st.markdown("#####  Histórico da conversa")
         painel_conversa_chamado(chamado, usuario, "analista", key_prefix="hist")
@@ -1364,6 +1423,34 @@ def relatorio_ia(chamados):
     )
 
 
+def relatorio_aprendizado_por_casos():
+    """Mostra a memória validada que está disponível ao RAG em novas consultas."""
+    st.markdown("### Aprendizado por casos validados")
+    st.caption(
+        "Estes são os únicos casos operacionais disponíveis para a IA consultar. "
+        "Cada um teve diagnóstico e solução registrados pelo analista e confirmação do solicitante."
+    )
+    casos = listar_casos_base_ia()
+    if not casos:
+        st.info(
+            "Ainda não há casos ensinando a IA. Para incluir um, o analista deve autorizar "
+            "o uso como referência e o solicitante deve confirmar a solução."
+        )
+        return
+
+    dados = pd.DataFrame(casos)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Casos disponíveis à IA", len(dados))
+    c2.metric("Categorias com experiência", int(dados["categoria_final"].fillna("Outros").nunique()))
+    c3.metric("Última confirmação", pd.to_datetime(dados["confirmado_em"]).max().strftime("%d/%m/%Y %H:%M"))
+    c4.metric("Classificações corrigidas", int(dados["classificacao_corrigida"].fillna(False).astype(bool).sum()))
+
+    exibicao = dados[["chamado_id", "titulo", "categoria_ia", "categoria_final", "urgencia_ia", "urgencia_final", "equipe_ia", "equipe_final", "diagnostico", "solucao", "confirmado_em"]].copy()
+    exibicao.columns = ["Chamado", "Título", "Categoria IA", "Categoria final", "Urgência IA", "Urgência final", "Equipe IA", "Equipe final", "Diagnóstico", "Solução", "Confirmado em"]
+    exibicao["Confirmado em"] = pd.to_datetime(exibicao["Confirmado em"]).dt.strftime("%d/%m/%Y %H:%M")
+    st.dataframe(exibicao, use_container_width=True, hide_index=True)
+
+
 def relatorio_produtividade_equipe(chamados):
     st.markdown("### Relatório de produtividade da equipe")
     st.caption("Produção por analista, baseada nos chamados atribuídos. O tempo de resolução desconta períodos em espera registrados.")
@@ -1533,6 +1620,8 @@ def tela_admin(usuario):
         relatorio_sla_desempenho(chamados)
         st.divider()
         relatorio_ia(chamados)
+        st.divider()
+        relatorio_aprendizado_por_casos()
         st.divider()
         relatorio_produtividade_equipe(chamados)
         st.divider()

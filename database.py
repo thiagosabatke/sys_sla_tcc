@@ -19,6 +19,10 @@ TRANSICOES_STATUS = {
     "Cancelado": (),
 }
 
+CATEGORIAS_VALIDAS = {"Acesso", "Software", "Hardware", "Rede", "Outros"}
+URGENCIAS_VALIDAS = {"Baixa", "Media", "Alta", "Critica"}
+EQUIPES_VALIDAS = {"Suporte", "Software", "Hardware", "Redes"}
+
 
 def status_disponiveis(status_atual):
     return list(TRANSICOES_STATUS.get(status_atual, ()))
@@ -228,6 +232,14 @@ def criar_tabela_chamados():
             urgencia VARCHAR(50),
             confiabilidade VARCHAR(50),
             equipe_destino VARCHAR(100),
+            categoria_ia VARCHAR(100),
+            urgencia_ia VARCHAR(50),
+            equipe_ia VARCHAR(100),
+            categoria_final VARCHAR(100) NULL,
+            urgencia_final VARCHAR(50) NULL,
+            equipe_final VARCHAR(100) NULL,
+            classificacao_validada_em DATETIME NULL,
+            classificacao_validada_por INT NULL,
             sla_resposta VARCHAR(50),
             sla_resolucao VARCHAR(50),
 
@@ -238,6 +250,9 @@ def criar_tabela_chamados():
             -- Ciclo de vida (ITIL 4)
             status VARCHAR(50) NOT NULL DEFAULT 'Novo',
             motivo_cancelamento VARCHAR(255) NULL,
+            diagnostico_final TEXT NULL,
+            solucao_final TEXT NULL,
+            compartilhar_conhecimento BOOLEAN NOT NULL DEFAULT FALSE,
             criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
@@ -270,9 +285,20 @@ def migrar_tabela_chamados():
         "sla_resolucao": "VARCHAR(50)",
         "equipe_destino": "VARCHAR(100)",
         "confiabilidade": "VARCHAR(50)",
+        "categoria_ia": "VARCHAR(100)",
+        "urgencia_ia": "VARCHAR(50)",
+        "equipe_ia": "VARCHAR(100)",
+        "categoria_final": "VARCHAR(100) NULL",
+        "urgencia_final": "VARCHAR(50) NULL",
+        "equipe_final": "VARCHAR(100) NULL",
+        "classificacao_validada_em": "DATETIME NULL",
+        "classificacao_validada_por": "INT NULL",
         "usuario_id": "INT",
         "analista_id": "INT",
         "motivo_cancelamento": "VARCHAR(255) NULL",
+        "diagnostico_final": "TEXT NULL",
+        "solucao_final": "TEXT NULL",
+        "compartilhar_conhecimento": "BOOLEAN NOT NULL DEFAULT FALSE",
         "atualizado_em": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
         "prazo_resposta": "DATETIME NULL",
         "prazo_resolucao": "DATETIME NULL",
@@ -322,11 +348,110 @@ def migrar_tabela_chamados():
     cursor.execute("UPDATE chamados SET status = 'Em Andamento' WHERE status = 'Em Aberto'")
     cursor.execute("UPDATE chamados SET status = 'Em Espera' WHERE status = 'Aguardando'")
     cursor.execute("UPDATE chamados SET status = 'Fechado' WHERE status = 'Finalizado'")
+    cursor.execute("""UPDATE chamados
+                      SET categoria_ia = COALESCE(categoria_ia, categoria),
+                          urgencia_ia = COALESCE(urgencia_ia, urgencia),
+                          equipe_ia = COALESCE(equipe_ia, equipe_destino)
+                   """)
     conn.commit()
 
     cursor.close()
     conn.close()
     logger.debug("Migrações de chamados verificadas.")
+
+
+def criar_tabela_base_casos_ia():
+    """Cria a memória operacional usada pelo RAG.
+
+    A tabela só recebe chamados cuja resolução foi confirmada pelo solicitante e
+    autorizada pelo analista. Ela é deliberadamente separada dos chamados brutos.
+    """
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS base_casos_ia (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            chamado_id INT NOT NULL UNIQUE,
+            titulo VARCHAR(255) NOT NULL,
+            descricao_problema TEXT NOT NULL,
+            categoria_ia VARCHAR(100) NULL,
+            urgencia_ia VARCHAR(50) NULL,
+            equipe_ia VARCHAR(100) NULL,
+            confiabilidade_ia VARCHAR(50) NULL,
+            categoria_final VARCHAR(100) NOT NULL,
+            urgencia_final VARCHAR(50) NOT NULL,
+            equipe_final VARCHAR(100) NOT NULL,
+            classificacao_corrigida BOOLEAN NOT NULL DEFAULT FALSE,
+            diagnostico TEXT NOT NULL,
+            solucao TEXT NOT NULL,
+            analista_id INT NULL,
+            confirmado_em DATETIME NOT NULL,
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT fk_base_casos_chamado FOREIGN KEY (chamado_id)
+                REFERENCES chamados(id) ON DELETE CASCADE,
+            CONSTRAINT fk_base_casos_analista FOREIGN KEY (analista_id)
+                REFERENCES usuarios(id) ON DELETE SET NULL,
+            INDEX idx_base_casos_categoria_final (categoria_final)
+        )
+    """)
+    conn.commit()
+    cursor.close()
+    conn.close()
+    logger.debug("Tabela de base de casos da IA verificada.")
+
+
+def migrar_tabela_base_casos_ia():
+    """Evolui a base de aprendizado sem perder casos já confirmados."""
+    conn = conectar()
+    cursor = conn.cursor()
+    colunas_novas = {
+        "categoria_ia": "VARCHAR(100) NULL",
+        "urgencia_ia": "VARCHAR(50) NULL",
+        "equipe_ia": "VARCHAR(100) NULL",
+        "confiabilidade_ia": "VARCHAR(50) NULL",
+        "categoria_final": "VARCHAR(100) NULL",
+        "urgencia_final": "VARCHAR(50) NULL",
+        "equipe_final": "VARCHAR(100) NULL",
+        "classificacao_corrigida": "BOOLEAN NOT NULL DEFAULT FALSE",
+    }
+    for nome_coluna, tipo in colunas_novas.items():
+        if not _coluna_existe(cursor, "base_casos_ia", nome_coluna):
+            cursor.execute(f"ALTER TABLE base_casos_ia ADD COLUMN {nome_coluna} {tipo}")
+            conn.commit()
+            logger.info("Migração aplicada: coluna %s adicionada em base_casos_ia.", nome_coluna)
+
+    # Migra o valor legado antes de removê-lo; as novas colunas passam a ser a fonte única.
+    if _coluna_existe(cursor, "base_casos_ia", "categoria"):
+        cursor.execute("""UPDATE base_casos_ia
+                          SET categoria_final = COALESCE(categoria_final, categoria),
+                              categoria_ia = COALESCE(categoria_ia, categoria)""")
+        conn.commit()
+        cursor.execute("ALTER TABLE base_casos_ia DROP COLUMN categoria")
+        conn.commit()
+        logger.info("Migração aplicada: coluna legada categoria removida de base_casos_ia.")
+    cursor.execute("""UPDATE base_casos_ia
+                      SET urgencia_final = COALESCE(urgencia_final, 'Media'),
+                          equipe_final = COALESCE(equipe_final, 'Suporte')""")
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def listar_casos_base_ia():
+    """Retorna exclusivamente os casos confirmados que podem orientar a IA."""
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("""
+        SELECT id, chamado_id, titulo, descricao_problema, categoria_ia, urgencia_ia,
+               equipe_ia, confiabilidade_ia, categoria_final, urgencia_final, equipe_final,
+               classificacao_corrigida, diagnostico, solucao, confirmado_em
+        FROM base_casos_ia
+        ORDER BY confirmado_em DESC
+    """)
+    casos = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return casos
 
 
 def salvar_chamado(titulo, descricao, categoria, urgencia, confiabilidade=None,
@@ -339,13 +464,13 @@ def salvar_chamado(titulo, descricao, categoria, urgencia, confiabilidade=None,
     cursor = conn.cursor()
     cursor.execute(
         """INSERT INTO chamados
-           (titulo, descricao, categoria, urgencia, confiabilidade,
-            sla_resposta, sla_resolucao, equipe_destino, usuario_id,
-            criado_em, prazo_resposta, prazo_resolucao)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-        (titulo, descricao, categoria, urgencia, confiabilidade,
-         sla_resposta, sla_resolucao, equipe_destino, usuario_id,
-         criado_em, prazo_resposta, prazo_resolucao),
+           (titulo, descricao, categoria, urgencia, confiabilidade, equipe_destino,
+            categoria_ia, urgencia_ia, equipe_ia,
+            sla_resposta, sla_resolucao, usuario_id, criado_em, prazo_resposta, prazo_resolucao)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+        (titulo, descricao, categoria, urgencia, confiabilidade, equipe_destino,
+         categoria, urgencia, equipe_destino,
+         sla_resposta, sla_resolucao, usuario_id, criado_em, prazo_resposta, prazo_resolucao),
     )
     novo_id = cursor.lastrowid
     _registrar_auditoria(
@@ -458,6 +583,67 @@ def atualizar_status_chamado(chamado_id, novo_status, autor_id=None):
     conn.close()
 
 
+def registrar_resolucao_chamado(chamado_id, analista_id, diagnostico, solucao,
+                                compartilhar_conhecimento, categoria_final,
+                                urgencia_final, equipe_final):
+    """Registra a resolução técnica antes de marcar o chamado como resolvido."""
+    diagnostico = (diagnostico or "").strip()
+    solucao = (solucao or "").strip()
+    if not diagnostico or not solucao:
+        raise ValueError("Informe o diagnóstico e a solução aplicada antes de resolver o chamado.")
+    if categoria_final not in CATEGORIAS_VALIDAS:
+        raise ValueError("Categoria final inválida.")
+    if urgencia_final not in URGENCIAS_VALIDAS:
+        raise ValueError("Urgência final inválida.")
+    if equipe_final not in EQUIPES_VALIDAS:
+        raise ValueError("Equipe final inválida.")
+
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        "SELECT status, analista_id, categoria_ia, urgencia_ia, equipe_ia FROM chamados WHERE id = %s",
+        (chamado_id,),
+    )
+    chamado = cursor.fetchone()
+    if not chamado or chamado["analista_id"] != analista_id or chamado["status"] != "Em Andamento":
+        cursor.close()
+        conn.close()
+        raise ValueError("Somente o analista responsável pode registrar a resolução deste chamado.")
+    cursor.close()
+
+    agora = datetime.now()
+    cursor = conn.cursor()
+    cursor.execute(
+        """UPDATE chamados
+           SET diagnostico_final = %s, solucao_final = %s,
+               compartilhar_conhecimento = %s,
+               categoria = %s, urgencia = %s, equipe_destino = %s,
+               categoria_final = %s, urgencia_final = %s, equipe_final = %s,
+               classificacao_validada_em = %s, classificacao_validada_por = %s,
+               status = 'Resolvido', resolvido_em = %s
+           WHERE id = %s""",
+        (diagnostico, solucao, bool(compartilhar_conhecimento),
+         categoria_final, urgencia_final, equipe_final,
+         categoria_final, urgencia_final, equipe_final, agora, analista_id,
+         agora, chamado_id),
+    )
+    classificacao_corrigida = any((
+        chamado["categoria_ia"] != categoria_final,
+        chamado["urgencia_ia"] != urgencia_final,
+        chamado["equipe_ia"] != equipe_final,
+    ))
+    _registrar_auditoria(
+        cursor, analista_id, "RESOLUCAO_REGISTRADA", "chamado", chamado_id,
+        detalhes={
+            "compartilhar_conhecimento": bool(compartilhar_conhecimento),
+            "classificacao_corrigida": classificacao_corrigida,
+        },
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
 def atribuir_chamado(chamado_id, analista_id):
     conn = conectar()
     cursor = conn.cursor()
@@ -519,6 +705,40 @@ def confirmar_resolucao_usuario(chamado_id, usuario_id):
         cursor.close()
         conn.close()
         raise ValueError("A resolução não pode ser confirmada para este chamado.")
+
+    cursor.execute(
+        """SELECT titulo, descricao, categoria_ia, urgencia_ia, equipe_ia, confiabilidade,
+                  categoria_final, urgencia_final, equipe_final, diagnostico_final, solucao_final,
+                  compartilhar_conhecimento, analista_id
+           FROM chamados WHERE id = %s""",
+        (chamado_id,),
+    )
+    chamado = cursor.fetchone()
+    if chamado[11] and chamado[9] and chamado[10]:
+        classificacao_corrigida = any((
+            chamado[2] != chamado[6], chamado[3] != chamado[7], chamado[4] != chamado[8],
+        ))
+        cursor.execute(
+            """INSERT INTO base_casos_ia
+               (chamado_id, titulo, descricao_problema,
+                categoria_ia, urgencia_ia, equipe_ia, confiabilidade_ia,
+                categoria_final, urgencia_final, equipe_final, classificacao_corrigida,
+                diagnostico, solucao, analista_id, confirmado_em)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON DUPLICATE KEY UPDATE titulo = VALUES(titulo),
+                   descricao_problema = VALUES(descricao_problema),
+                   categoria_ia = VALUES(categoria_ia), urgencia_ia = VALUES(urgencia_ia),
+                   equipe_ia = VALUES(equipe_ia), confiabilidade_ia = VALUES(confiabilidade_ia),
+                   categoria_final = VALUES(categoria_final), urgencia_final = VALUES(urgencia_final),
+                   equipe_final = VALUES(equipe_final), classificacao_corrigida = VALUES(classificacao_corrigida),
+                   diagnostico = VALUES(diagnostico), solucao = VALUES(solucao),
+                   analista_id = VALUES(analista_id), confirmado_em = VALUES(confirmado_em)""",
+            (chamado_id, chamado[0], chamado[1],
+             chamado[2], chamado[3], chamado[4], chamado[5],
+             chamado[6], chamado[7], chamado[8], classificacao_corrigida,
+             chamado[9], chamado[10], chamado[12], datetime.now()),
+        )
+        _registrar_auditoria(cursor, usuario_id, "CASO_PROMOVIDO_PARA_IA", "base_casos_ia", chamado_id)
     _registrar_auditoria(
         cursor, usuario_id, "RESOLUCAO_CONFIRMADA", "chamado", chamado_id,
         detalhes={"status_anterior": "Resolvido", "status_novo": "Fechado"},
@@ -995,6 +1215,8 @@ if __name__ == "__main__":
     migrar_tabela_usuarios()
     criar_tabela_chamados()
     migrar_tabela_chamados()
+    criar_tabela_base_casos_ia()
+    migrar_tabela_base_casos_ia()
     criar_tabela_codigos()
     criar_tabela_mensagens()
     criar_tabela_anexos()

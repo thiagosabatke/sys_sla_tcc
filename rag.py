@@ -3,6 +3,7 @@ import re
 import logging
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from database import listar_casos_base_ia
 
 from observability import configurar_logging
 
@@ -80,6 +81,7 @@ def carregar_base():
 
         _artigos[nome_arquivo] = {
             "arquivo": nome_arquivo,
+            "tipo": "procedimento_oficial",
             "titulo": titulo,
             "categoria": categoria,
             "resumo": resumo,
@@ -101,6 +103,36 @@ def carregar_base():
                 "texto_embedding": texto_para_embedding,
             })
 
+
+    try:
+        casos = listar_casos_base_ia()
+    except Exception as erro:
+        logger.warning("Não foi possível carregar casos validados da IA: %s", erro)
+        casos = []
+    for caso in casos:
+        fonte = f"Caso validado #{caso['chamado_id']}"
+        conteudo = (
+            f"Problema: {caso['descricao_problema']}\n"
+            f"Diagnóstico confirmado: {caso['diagnostico']}\n"
+            f"Solução aplicada: {caso['solucao']}"
+        )
+        _artigos[fonte] = {
+            "arquivo": fonte,
+            "tipo": "caso_validado",
+            "titulo": caso["titulo"],
+            "categoria": caso.get("categoria_final") or "Outros",
+            "categoria_ia": caso.get("categoria_ia"),
+            "urgencia_ia": caso.get("urgencia_ia"),
+            "equipe_ia": caso.get("equipe_ia"),
+            "categoria_final": caso.get("categoria_final"),
+            "urgencia_final": caso.get("urgencia_final"),
+            "equipe_final": caso.get("equipe_final"),
+            "resumo": "Caso resolvido e confirmado pelo solicitante.",
+            "tags": [],
+            "corpo": conteudo,
+        }
+        _trechos.append({"arquivo": fonte, "texto_embedding": f"{caso['titulo']}\n{conteudo}"})
+
     if _trechos:
         textos = [t["texto_embedding"] for t in _trechos]
         _vetores = _modelo_embeddings.encode(textos, show_progress_bar=False)
@@ -114,13 +146,11 @@ def _similaridade_cosseno(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 
-def buscar_contexto(texto_chamado, top_k=3):
-
-
+def buscar_contexto(texto_chamado, top_k=3, tipo=None):
+    # Recarrega para incorporar novos casos confirmados imediatamente.
+    carregar_base()
     if _vetores is None:
-        carregar_base()
-        if _vetores is None:
-            return []
+        return []
 
     vetor_chamado = _modelo_embeddings.encode([texto_chamado])[0]
 
@@ -140,12 +170,21 @@ def buscar_contexto(texto_chamado, top_k=3):
         arquivos_incluidos.add(arquivo)
 
         artigo = _artigos[arquivo]
+        if tipo and artigo.get("tipo") != tipo:
+            continue
         resultados.append({
             "arquivo": arquivo,
             "titulo": artigo["titulo"],
+            "tipo": artigo.get("tipo", "procedimento_oficial"),
             "categoria": artigo["categoria"],
             "conteudo": artigo["corpo"],
             "similaridade": float(similaridades[i]),
+            "categoria_ia": artigo.get("categoria_ia"),
+            "urgencia_ia": artigo.get("urgencia_ia"),
+            "equipe_ia": artigo.get("equipe_ia"),
+            "categoria_final": artigo.get("categoria_final"),
+            "urgencia_final": artigo.get("urgencia_final"),
+            "equipe_final": artigo.get("equipe_final"),
         })
 
         if len(resultados) >= top_k:

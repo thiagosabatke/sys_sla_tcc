@@ -84,6 +84,7 @@ usuários, chamados, mensagens, anexos, pesquisas de satisfação e auditoria.
   ele ser atribuído a um analista, informando o motivo. As transições são
   validadas no banco, não apenas na tela.
 - Administrador: cadastra, edita e exclui contas de usuário, analista e admin.
+- Aprendizado por casos: ao resolver um chamado, o analista informa o diagnóstico e a solução aplicada. Se autorizar o compartilhamento e o solicitante confirmar a resolução, o chamado é copiado para a tabela `base_casos_ia`. Somente essa tabela de casos validados é usada pela IA como experiência operacional; chamados, conversas e respostas não confirmadas nunca são usados como conhecimento.
 
 Se `python main.py` rodar sem erro e você ver os chamados classificados
 e salvos no banco, o núcleo do protótipo já está funcionando - o resto
