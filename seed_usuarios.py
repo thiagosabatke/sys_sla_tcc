@@ -1,4 +1,5 @@
 import logging
+import os
 
 from database import criar_tabela_usuarios, criar_usuario, buscar_usuario_por_email, criar_tabela_auditoria
 from auth import gerar_hash_senha
@@ -6,18 +7,17 @@ from observability import configurar_logging
 
 logger = logging.getLogger(__name__)
  
-USUARIOS_TESTE = [
-    {"nome": "Thiago Admin", "email": "tsabatke7@gmail.com", "senha": "Thiago123", "papel": "admin"},
-]
- 
 if __name__ == "__main__":
     configurar_logging()
+    nome = os.getenv("SEED_ADMIN_NOME")
+    email = os.getenv("SEED_ADMIN_EMAIL")
+    senha = os.getenv("SEED_ADMIN_SENHA")
+    if not all((nome, email, senha)):
+        raise SystemExit("Defina SEED_ADMIN_NOME, SEED_ADMIN_EMAIL e SEED_ADMIN_SENHA para criar uma conta inicial.")
     criar_tabela_usuarios()
     criar_tabela_auditoria()
-    for u in USUARIOS_TESTE:
-        if buscar_usuario_por_email(u["email"]):
-            logger.info("Usuário %s já existe; ignorado.", u["email"])
-            continue
-        hash_senha = gerar_hash_senha(u["senha"])
-        criar_usuario(u["nome"], u["email"], hash_senha, u["papel"])
-        logger.info("Usuário %s criado com perfil %s.", u["email"], u["papel"])
+    if buscar_usuario_por_email(email):
+        logger.info("Conta inicial já existe; ignorada.")
+    else:
+        criar_usuario(nome, email, gerar_hash_senha(senha), "admin")
+        logger.info("Conta inicial de administrador criada.")

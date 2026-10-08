@@ -1,6 +1,11 @@
 import os
 import logging
 import json
+import io
+import re
+import zipfile
+import hashlib
+import hmac
 from datetime import datetime
 import mysql.connector
 from dotenv import load_dotenv
@@ -9,6 +14,8 @@ from sla import calcular_prazos
 from observability import configurar_logging
 
 logger = logging.getLogger(__name__)
+
+load_dotenv()
 
 TRANSICOES_STATUS = {
     "Novo": ("Em Andamento",),
@@ -22,12 +29,11 @@ TRANSICOES_STATUS = {
 CATEGORIAS_VALIDAS = {"Acesso", "Software", "Hardware", "Rede", "Outros"}
 URGENCIAS_VALIDAS = {"Baixa", "Media", "Alta", "Critica"}
 EQUIPES_VALIDAS = {"Suporte", "Software", "Hardware", "Redes"}
+VERSAO_POLITICA_PRIVACIDADE = os.getenv("POLITICA_PRIVACIDADE_VERSAO", "1.1.0")
 
 
 def status_disponiveis(status_atual):
     return list(TRANSICOES_STATUS.get(status_atual, ()))
-
-load_dotenv()
 
 
 def conectar():
@@ -63,6 +69,15 @@ def _trigger_existe(cursor, nome_trigger):
         """SELECT COUNT(*) FROM information_schema.TRIGGERS
            WHERE TRIGGER_SCHEMA = DATABASE() AND TRIGGER_NAME = %s""",
         (nome_trigger,),
+    )
+    return cursor.fetchone()[0] > 0
+
+
+def _indice_existe(cursor, tabela, nome_indice):
+    cursor.execute(
+        """SELECT COUNT(*) FROM information_schema.STATISTICS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND INDEX_NAME = %s""",
+        (tabela, nome_indice),
     )
     return cursor.fetchone()[0] > 0
 
@@ -147,6 +162,82 @@ def criar_tabela_auditoria():
     conn.close()
 
 
+def _hash_politica_privacidade():
+    caminho = os.path.join(os.path.dirname(__file__), "PRIVACIDADE.md")
+    try:
+        with open(caminho, "rb") as arquivo:
+            return hashlib.sha256(arquivo.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def criar_tabelas_privacidade():
+    """Registra a versão publicada e os aceites vinculados a ela."""
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS politicas_privacidade (
+            versao VARCHAR(30) PRIMARY KEY,
+            conteudo_hash CHAR(64) NULL,
+            publicada_em DATETIME NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS aceites_privacidade (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            usuario_id INT NOT NULL,
+            politica_versao VARCHAR(30) NOT NULL,
+            finalidade VARCHAR(80) NOT NULL,
+            aceito_em DATETIME NOT NULL,
+            revogado_em DATETIME NULL,
+            FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+            INDEX idx_aceites_usuario_finalidade (usuario_id, finalidade, aceito_em)
+        )
+    """)
+    cursor.execute(
+        """INSERT IGNORE INTO politicas_privacidade (versao, conteudo_hash, publicada_em)
+           VALUES (%s, %s, %s)""",
+        (VERSAO_POLITICA_PRIVACIDADE, _hash_politica_privacidade(), datetime.now()),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def usuario_aceitou_politica(usuario_id, finalidade="uso_do_sistema"):
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute(
+        """SELECT 1 FROM aceites_privacidade
+           WHERE usuario_id = %s AND politica_versao = %s AND finalidade = %s
+             AND revogado_em IS NULL
+           ORDER BY aceito_em DESC LIMIT 1""",
+        (usuario_id, VERSAO_POLITICA_PRIVACIDADE, finalidade),
+    )
+    aceitou = cursor.fetchone() is not None
+    cursor.close()
+    conn.close()
+    return aceitou
+
+
+def registrar_aceite_privacidade(usuario_id, finalidade, autor_id=None):
+    conn = conectar()
+    cursor = conn.cursor()
+    agora = datetime.now()
+    cursor.execute(
+        """INSERT INTO aceites_privacidade (usuario_id, politica_versao, finalidade, aceito_em)
+           VALUES (%s, %s, %s, %s)""",
+        (usuario_id, VERSAO_POLITICA_PRIVACIDADE, finalidade, agora),
+    )
+    _registrar_auditoria(
+        cursor, autor_id or usuario_id, "ACEITE_PRIVACIDADE_REGISTRADO", "usuario", usuario_id,
+        detalhes={"politica_versao": VERSAO_POLITICA_PRIVACIDADE, "finalidade": finalidade},
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
 def listar_auditoria(limite=200, usuario_id=None):
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
@@ -166,6 +257,24 @@ def listar_auditoria(limite=200, usuario_id=None):
     return eventos
 
 
+def criar_tabela_departamentos():
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS departamentos (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            nome VARCHAR(100) NOT NULL UNIQUE,
+            descricao VARCHAR(255) NULL,
+            ativo BOOLEAN NOT NULL DEFAULT TRUE,
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
 def criar_tabela_usuarios():
     conn = conectar()
     cursor = conn.cursor()
@@ -177,14 +286,19 @@ def criar_tabela_usuarios():
             nome VARCHAR(255) NOT NULL,
             sobrenome VARCHAR(255) NULL,
             email VARCHAR(255) NOT NULL UNIQUE,
+            cpf_hash CHAR(64) NULL,
+            UNIQUE KEY uq_usuarios_cpf_hash (cpf_hash),
             papel VARCHAR(20) NOT NULL DEFAULT 'usuario',
             telefone VARCHAR(30) NULL,
             departamento VARCHAR(100) NULL,
+            departamento_id INT NULL,
             cargo VARCHAR(100) NULL,
 
             -- Autenticação
             senha_hash VARCHAR(255) NOT NULL,
             totp_secret VARCHAR(64),
+            senha_deve_ser_redefinida BOOLEAN NOT NULL DEFAULT FALSE,
+            conta_anonimizada_em DATETIME NULL,
             ultimo_login_em DATETIME NULL,
 
             criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -201,10 +315,14 @@ def migrar_tabela_usuarios():
     cursor = conn.cursor()
     colunas_novas = {
         "totp_secret": "VARCHAR(64)",
+        "senha_deve_ser_redefinida": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "conta_anonimizada_em": "DATETIME NULL",
         "ultimo_login_em": "DATETIME NULL",
         "sobrenome": "VARCHAR(255) NULL",
         "telefone": "VARCHAR(30) NULL",
+        "cpf_hash": "CHAR(64) NULL",
         "departamento": "VARCHAR(100) NULL",
+        "departamento_id": "INT NULL",
         "cargo": "VARCHAR(100) NULL",
     }
     for nome_coluna, tipo in colunas_novas.items():
@@ -212,8 +330,45 @@ def migrar_tabela_usuarios():
             cursor.execute(f"ALTER TABLE usuarios ADD COLUMN {nome_coluna} {tipo}")
             conn.commit()
             logger.info("Migração aplicada: coluna %s adicionada em usuários.", nome_coluna)
+    if not _indice_existe(cursor, "usuarios", "uq_usuarios_cpf_hash"):
+        cursor.execute("CREATE UNIQUE INDEX uq_usuarios_cpf_hash ON usuarios (cpf_hash)")
+        conn.commit()
+        logger.info("Migração aplicada: índice único de CPF adicionado em usuários.")
     cursor.close()
     conn.close()
+
+
+def migrar_departamentos_usuarios():
+    """Converte departamentos legados em registros reutilizáveis e vincula as contas."""
+    conn = conectar()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """INSERT IGNORE INTO departamentos (nome)
+               SELECT DISTINCT TRIM(departamento)
+               FROM usuarios
+               WHERE departamento IS NOT NULL AND TRIM(departamento) <> ''"""
+        )
+        cursor.execute(
+            """UPDATE usuarios u
+               INNER JOIN departamentos d ON d.nome = TRIM(u.departamento)
+               SET u.departamento_id = d.id
+               WHERE u.departamento_id IS NULL
+                 AND u.departamento IS NOT NULL AND TRIM(u.departamento) <> ''"""
+        )
+        if not _fk_existe(cursor, "usuarios", "fk_usuarios_departamento"):
+            cursor.execute(
+                """ALTER TABLE usuarios
+                   ADD CONSTRAINT fk_usuarios_departamento
+                   FOREIGN KEY (departamento_id) REFERENCES departamentos(id) ON DELETE SET NULL"""
+            )
+        conn.commit()
+    except mysql.connector.Error as erro:
+        conn.rollback()
+        logger.warning("Não foi possível concluir a migração de departamentos: %s", erro)
+    finally:
+        cursor.close()
+        conn.close()
 
 def criar_tabela_chamados():
     conn = conectar()
@@ -238,8 +393,6 @@ def criar_tabela_chamados():
             categoria_final VARCHAR(100) NULL,
             urgencia_final VARCHAR(50) NULL,
             equipe_final VARCHAR(100) NULL,
-            classificacao_validada_em DATETIME NULL,
-            classificacao_validada_por INT NULL,
             sla_resposta VARCHAR(50),
             sla_resolucao VARCHAR(50),
 
@@ -253,6 +406,7 @@ def criar_tabela_chamados():
             diagnostico_final TEXT NULL,
             solucao_final TEXT NULL,
             compartilhar_conhecimento BOOLEAN NOT NULL DEFAULT FALSE,
+            uso_ia_autorizado_em DATETIME NULL,
             criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
@@ -291,14 +445,13 @@ def migrar_tabela_chamados():
         "categoria_final": "VARCHAR(100) NULL",
         "urgencia_final": "VARCHAR(50) NULL",
         "equipe_final": "VARCHAR(100) NULL",
-        "classificacao_validada_em": "DATETIME NULL",
-        "classificacao_validada_por": "INT NULL",
         "usuario_id": "INT",
         "analista_id": "INT",
         "motivo_cancelamento": "VARCHAR(255) NULL",
         "diagnostico_final": "TEXT NULL",
         "solucao_final": "TEXT NULL",
         "compartilhar_conhecimento": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "uso_ia_autorizado_em": "DATETIME NULL",
         "atualizado_em": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
         "prazo_resposta": "DATETIME NULL",
         "prazo_resolucao": "DATETIME NULL",
@@ -344,6 +497,12 @@ def migrar_tabela_chamados():
                 logger.info("Migração aplicada: chave estrangeira %s adicionada.", nome_fk)
             except mysql.connector.Error as erro:
                 logger.warning("Não foi possível criar a chave estrangeira %s: %s", nome_fk, erro)
+
+    for coluna_excedente in ("classificacao_validada_em", "classificacao_validada_por"):
+        if _coluna_existe(cursor, "chamados", coluna_excedente):
+            cursor.execute(f"ALTER TABLE chamados DROP COLUMN {coluna_excedente}")
+            conn.commit()
+            logger.info("Minimização aplicada: coluna sem leitor removida de chamados: %s", coluna_excedente)
 
     cursor.execute("UPDATE chamados SET status = 'Em Andamento' WHERE status = 'Em Aberto'")
     cursor.execute("UPDATE chamados SET status = 'Em Espera' WHERE status = 'Aguardando'")
@@ -432,6 +591,13 @@ def migrar_tabela_base_casos_ia():
     cursor.execute("""UPDATE base_casos_ia
                       SET urgencia_final = COALESCE(urgencia_final, 'Media'),
                           equipe_final = COALESCE(equipe_final, 'Suporte')""")
+    # Casos legados não possuem autorização registrada do titular. A remoção
+    # alcança somente a cópia de aprendizagem; o chamado original é preservado.
+    cursor.execute("""DELETE b FROM base_casos_ia b
+                      LEFT JOIN chamados c ON c.id = b.chamado_id
+                      WHERE c.uso_ia_autorizado_em IS NULL""")
+    if cursor.rowcount:
+        logger.info("%d caso(s) legado(s) removido(s) da base da IA por falta de autorização do titular.", cursor.rowcount)
     conn.commit()
     cursor.close()
     conn.close()
@@ -619,12 +785,11 @@ def registrar_resolucao_chamado(chamado_id, analista_id, diagnostico, solucao,
                compartilhar_conhecimento = %s,
                categoria = %s, urgencia = %s, equipe_destino = %s,
                categoria_final = %s, urgencia_final = %s, equipe_final = %s,
-               classificacao_validada_em = %s, classificacao_validada_por = %s,
                status = 'Resolvido', resolvido_em = %s
            WHERE id = %s""",
         (diagnostico, solucao, bool(compartilhar_conhecimento),
          categoria_final, urgencia_final, equipe_final,
-         categoria_final, urgencia_final, equipe_final, agora, analista_id,
+         categoria_final, urgencia_final, equipe_final,
          agora, chamado_id),
     )
     classificacao_corrigida = any((
@@ -692,14 +857,31 @@ def cancelar_chamado_sem_atribuicao(chamado_id, motivo, autor_id=None):
     conn.close()
 
 
-def confirmar_resolucao_usuario(chamado_id, usuario_id):
+def _anonimizar_texto_para_ia(texto, usuario):
+    """Remove identificadores diretos antes de reutilizar texto no RAG local."""
+    import re
+
+    texto = texto or ""
+    texto = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[e-mail removido]", texto)
+    texto = re.sub(r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b", "[CPF removido]", texto)
+    texto = re.sub(r"(?<!\d)(?:\+?55\s*)?(?:\(?\d{2}\)?\s*)?9?\d{4}[-\s]?\d{4}(?!\d)", "[telefone removido]", texto)
+    for campo in ("email", "nome", "sobrenome", "telefone"):
+        valor = (usuario.get(campo) or "").strip()
+        if valor:
+            texto = re.sub(re.escape(valor), f"[{campo} removido]", texto, flags=re.IGNORECASE)
+    return texto
+
+
+def confirmar_resolucao_usuario(chamado_id, usuario_id, autoriza_uso_ia=False):
     conn = conectar()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
+    agora = datetime.now()
     cursor.execute(
         """UPDATE chamados
-           SET status = 'Fechado'
+           SET status = 'Fechado',
+               uso_ia_autorizado_em = CASE WHEN %s THEN %s ELSE NULL END
            WHERE id = %s AND usuario_id = %s AND status = 'Resolvido'""",
-        (chamado_id, usuario_id),
+        (bool(autoriza_uso_ia), agora, chamado_id, usuario_id),
     )
     if cursor.rowcount == 0:
         cursor.close()
@@ -707,16 +889,24 @@ def confirmar_resolucao_usuario(chamado_id, usuario_id):
         raise ValueError("A resolução não pode ser confirmada para este chamado.")
 
     cursor.execute(
-        """SELECT titulo, descricao, categoria_ia, urgencia_ia, equipe_ia, confiabilidade,
-                  categoria_final, urgencia_final, equipe_final, diagnostico_final, solucao_final,
-                  compartilhar_conhecimento, analista_id
-           FROM chamados WHERE id = %s""",
+        """SELECT c.titulo, c.descricao, c.categoria_ia, c.urgencia_ia, c.equipe_ia, c.confiabilidade,
+                  c.categoria_final, c.urgencia_final, c.equipe_final, c.diagnostico_final, c.solucao_final,
+                  c.compartilhar_conhecimento, c.analista_id, u.nome, u.sobrenome, u.email, u.telefone
+           FROM chamados c JOIN usuarios u ON u.id = c.usuario_id
+           WHERE c.id = %s""",
         (chamado_id,),
     )
     chamado = cursor.fetchone()
-    if chamado[11] and chamado[9] and chamado[10]:
+    if autoriza_uso_ia and chamado["compartilhar_conhecimento"] and chamado["diagnostico_final"] and chamado["solucao_final"]:
+        cursor.execute(
+            """INSERT INTO aceites_privacidade (usuario_id, politica_versao, finalidade, aceito_em)
+               VALUES (%s, %s, %s, %s)""",
+            (usuario_id, VERSAO_POLITICA_PRIVACIDADE, "uso_ia_referencia_interna", agora),
+        )
         classificacao_corrigida = any((
-            chamado[2] != chamado[6], chamado[3] != chamado[7], chamado[4] != chamado[8],
+            chamado["categoria_ia"] != chamado["categoria_final"],
+            chamado["urgencia_ia"] != chamado["urgencia_final"],
+            chamado["equipe_ia"] != chamado["equipe_final"],
         ))
         cursor.execute(
             """INSERT INTO base_casos_ia
@@ -733,15 +923,18 @@ def confirmar_resolucao_usuario(chamado_id, usuario_id):
                    equipe_final = VALUES(equipe_final), classificacao_corrigida = VALUES(classificacao_corrigida),
                    diagnostico = VALUES(diagnostico), solucao = VALUES(solucao),
                    analista_id = VALUES(analista_id), confirmado_em = VALUES(confirmado_em)""",
-            (chamado_id, chamado[0], chamado[1],
-             chamado[2], chamado[3], chamado[4], chamado[5],
-             chamado[6], chamado[7], chamado[8], classificacao_corrigida,
-             chamado[9], chamado[10], chamado[12], datetime.now()),
+            (chamado_id,
+             _anonimizar_texto_para_ia(chamado["titulo"], chamado),
+             _anonimizar_texto_para_ia(chamado["descricao"], chamado),
+             chamado["categoria_ia"], chamado["urgencia_ia"], chamado["equipe_ia"], chamado["confiabilidade"],
+             chamado["categoria_final"], chamado["urgencia_final"], chamado["equipe_final"], classificacao_corrigida,
+             _anonimizar_texto_para_ia(chamado["diagnostico_final"], chamado),
+             _anonimizar_texto_para_ia(chamado["solucao_final"], chamado), chamado["analista_id"], agora),
         )
         _registrar_auditoria(cursor, usuario_id, "CASO_PROMOVIDO_PARA_IA", "base_casos_ia", chamado_id)
     _registrar_auditoria(
         cursor, usuario_id, "RESOLUCAO_CONFIRMADA", "chamado", chamado_id,
-        detalhes={"status_anterior": "Resolvido", "status_novo": "Fechado"},
+        detalhes={"status_anterior": "Resolvido", "status_novo": "Fechado", "uso_ia_autorizado": bool(autoriza_uso_ia)},
     )
     conn.commit()
     cursor.close()
@@ -959,9 +1152,6 @@ def criar_tabela_atendimentos_ia():
             id INT AUTO_INCREMENT PRIMARY KEY,
             usuario_id INT NULL,
             chamado_id INT NULL,
-            titulo VARCHAR(255) NOT NULL,
-            descricao TEXT NOT NULL,
-            solucao TEXT NOT NULL,
             resultado VARCHAR(30) NOT NULL DEFAULT 'Pendente',
             criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             respondido_em DATETIME NULL,
@@ -976,13 +1166,25 @@ def criar_tabela_atendimentos_ia():
     conn.close()
 
 
-def salvar_atendimento_ia(usuario_id, titulo, descricao, solucao):
+def migrar_tabela_atendimentos_ia():
+    """Remove conteúdo de orientação da IA que não é reutilizado nem exibido."""
+    conn = conectar()
+    cursor = conn.cursor()
+    for coluna_excedente in ("titulo", "descricao", "solucao"):
+        if _coluna_existe(cursor, "atendimentos_ia", coluna_excedente):
+            cursor.execute(f"ALTER TABLE atendimentos_ia DROP COLUMN {coluna_excedente}")
+            conn.commit()
+            logger.info("Minimização aplicada: coluna sem leitor removida de atendimentos_ia: %s", coluna_excedente)
+    cursor.close()
+    conn.close()
+
+
+def salvar_atendimento_ia(usuario_id):
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
-        """INSERT INTO atendimentos_ia (usuario_id, titulo, descricao, solucao)
-           VALUES (%s, %s, %s, %s)""",
-        (usuario_id, titulo, descricao, solucao),
+        "INSERT INTO atendimentos_ia (usuario_id) VALUES (%s)",
+        (usuario_id,),
     )
     atendimento_id = cursor.lastrowid
     _registrar_auditoria(cursor, usuario_id, "ORIENTACAO_IA_APRESENTADA", "atendimento_ia", atendimento_id)
@@ -1034,15 +1236,129 @@ def listar_atendimentos_ia(limite=5000):
     return resultados
 
 
+def normalizar_cpf(cpf):
+    """Retorna o CPF normalizado somente quando seus dígitos verificadores são válidos."""
+    cpf_normalizado = re.sub(r"\D", "", cpf or "")
+    if len(cpf_normalizado) != 11 or cpf_normalizado == cpf_normalizado[0] * 11:
+        return None
+    primeiro = (sum(int(digito) * peso for digito, peso in zip(cpf_normalizado[:9], range(10, 1, -1))) * 10) % 11
+    primeiro = 0 if primeiro == 10 else primeiro
+    segundo = (sum(int(digito) * peso for digito, peso in zip(cpf_normalizado[:9] + str(primeiro), range(11, 1, -1))) * 10) % 11
+    segundo = 0 if segundo == 10 else segundo
+    return cpf_normalizado if cpf_normalizado[-2:] == f"{primeiro}{segundo}" else None
+
+
+def _hash_cpf(cpf_normalizado):
+    segredo = os.getenv("CPF_HASH_SECRET")
+    if not segredo:
+        raise ValueError("Configure CPF_HASH_SECRET antes de cadastrar ou pesquisar por CPF.")
+    return hmac.new(segredo.encode("utf-8"), cpf_normalizado.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def buscar_usuario_por_cpf(cpf):
+    cpf_normalizado = normalizar_cpf(cpf)
+    if not cpf_normalizado:
+        return None
+    cpf_hash = _hash_cpf(cpf_normalizado)
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM usuarios WHERE cpf_hash = %s", (cpf_hash,))
+    resultado = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return resultado
+
+
+def listar_departamentos(apenas_ativos=False):
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    consulta = """SELECT d.id, d.nome, d.descricao, d.ativo, d.criado_em, d.atualizado_em,
+                         COUNT(u.id) AS total_usuarios
+                  FROM departamentos d
+                  LEFT JOIN usuarios u ON u.departamento_id = d.id"""
+    if apenas_ativos:
+        consulta += " WHERE d.ativo = TRUE"
+    consulta += " GROUP BY d.id, d.nome, d.descricao, d.ativo, d.criado_em, d.atualizado_em ORDER BY d.nome"
+    cursor.execute(consulta)
+    departamentos = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return departamentos
+
+
+def criar_departamento(nome, descricao=None, autor_id=None):
+    nome = (nome or "").strip()
+    if not nome:
+        raise ValueError("Informe o nome do departamento.")
+    conn = conectar()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id FROM departamentos WHERE nome = %s", (nome,))
+        if cursor.fetchone():
+            raise ValueError("Já existe um departamento com esse nome.")
+        cursor.execute(
+            "INSERT INTO departamentos (nome, descricao) VALUES (%s, %s)",
+            (nome, (descricao or "").strip() or None),
+        )
+        departamento_id = cursor.lastrowid
+        _registrar_auditoria(cursor, autor_id, "DEPARTAMENTO_CRIADO", "departamento", departamento_id)
+        conn.commit()
+        return departamento_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def atualizar_departamento(departamento_id, nome, descricao, ativo, autor_id=None):
+    nome = (nome or "").strip()
+    if not nome:
+        raise ValueError("Informe o nome do departamento.")
+    conn = conectar()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id FROM departamentos WHERE nome = %s AND id <> %s", (nome, departamento_id))
+        if cursor.fetchone():
+            raise ValueError("Já existe um departamento com esse nome.")
+        cursor.execute(
+            "UPDATE departamentos SET nome = %s, descricao = %s, ativo = %s WHERE id = %s",
+            (nome, (descricao or "").strip() or None, bool(ativo), departamento_id),
+        )
+        if cursor.rowcount:
+            cursor.execute(
+                "UPDATE usuarios SET departamento = %s WHERE departamento_id = %s",
+                (nome, departamento_id),
+            )
+            _registrar_auditoria(
+                cursor, autor_id, "DEPARTAMENTO_ATUALIZADO", "departamento", departamento_id,
+                detalhes={"ativo": bool(ativo)},
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def criar_usuario(nome, email, senha_hash, papel, sobrenome=None, telefone=None,
-                  departamento=None, cargo=None, autor_id=None):
+                  cpf=None, departamento=None, departamento_id=None, cargo=None, autor_id=None):
+    cpf_hash = None
+    if cpf:
+        cpf_normalizado = normalizar_cpf(cpf)
+        if not cpf_normalizado:
+            raise ValueError("CPF inválido.")
+        cpf_hash = _hash_cpf(cpf_normalizado)
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
         """INSERT INTO usuarios
-           (nome, sobrenome, email, senha_hash, papel, telefone, departamento, cargo)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-        (nome, sobrenome, email, senha_hash, papel, telefone, departamento, cargo),
+           (nome, sobrenome, email, senha_hash, papel, telefone, cpf_hash, departamento, departamento_id, cargo)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+        (nome, sobrenome, email, senha_hash, papel, telefone, cpf_hash, departamento, departamento_id, cargo),
     )
     novo_id = cursor.lastrowid
     _registrar_auditoria(
@@ -1069,9 +1385,12 @@ def listar_usuarios():
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
-        """SELECT id, nome, sobrenome, email, papel, telefone, departamento, cargo, criado_em,
-                  ultimo_login_em AS ultimo_login
-           FROM usuarios ORDER BY criado_em DESC"""
+        """SELECT u.id, u.nome, u.sobrenome, u.email, u.papel, u.telefone,
+                  COALESCE(d.nome, u.departamento) AS departamento, u.departamento_id, u.cargo, u.criado_em,
+                  u.ultimo_login_em AS ultimo_login
+           FROM usuarios u
+           LEFT JOIN departamentos d ON d.id = u.departamento_id
+           ORDER BY u.criado_em DESC"""
     )
     resultados = cursor.fetchall()
     cursor.close()
@@ -1089,22 +1408,286 @@ def buscar_usuario_por_id(usuario_id):
     return resultado
 
 
+def buscar_titular_por_identificador(identificador):
+    """Localiza titular por e-mail ou por CPF válido, sem recuperar o número completo."""
+    valor = (identificador or "").strip()
+    if not valor:
+        return None, "Informe um e-mail ou CPF."
+    if "@" not in valor:
+        if not normalizar_cpf(valor):
+            return None, "Informe o e-mail cadastrado ou um CPF válido."
+        usuario = buscar_usuario_por_cpf(valor)
+        if not usuario:
+            return None, "Nenhum titular encontrado para o CPF informado."
+        return usuario, None
+    usuario = buscar_usuario_por_email(valor)
+    if not usuario:
+        return None, "Nenhum titular encontrado para o e-mail informado."
+    return usuario, None
+
+
+def _json_seguro(valor):
+    if isinstance(valor, (datetime,)):
+        return valor.isoformat()
+    if isinstance(valor, (bytes, bytearray)):
+        return None
+    raise TypeError(f"Tipo não serializável: {type(valor).__name__}")
+
+
+def _buscar_varios(cursor, consulta, parametros=()):
+    cursor.execute(consulta, parametros)
+    return cursor.fetchall()
+
+
+def exportar_dados_titular(usuario_id, autor_id=None):
+    """Gera ZIP de acesso com dados do titular, sem expor segredos de autenticação."""
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM usuarios WHERE id = %s", (usuario_id,))
+        usuario = cursor.fetchone()
+        if not usuario:
+            raise ValueError("Titular não encontrado.")
+
+        conta = {k: v for k, v in usuario.items() if k not in {"senha_hash", "totp_secret"}}
+        conta["credenciais_protegidas"] = {
+            "senha_hash_armazenado": bool(usuario.get("senha_hash")),
+            "totp_configurado": bool(usuario.get("totp_secret")),
+            "codigos_de_verificacao_nao_exportados": True,
+        }
+        chamados_solicitados = _buscar_varios(cursor, "SELECT * FROM chamados WHERE usuario_id = %s ORDER BY criado_em", (usuario_id,))
+        chamados_atendidos = _buscar_varios(
+            cursor,
+            """SELECT id, status, categoria, urgencia, equipe_destino, criado_em, atualizado_em,
+                      resolvido_em
+               FROM chamados WHERE analista_id = %s ORDER BY criado_em""",
+            (usuario_id,),
+        )
+        ids_chamados = [item["id"] for item in chamados_solicitados]
+        clausula_ids = ", ".join(["%s"] * len(ids_chamados)) or "NULL"
+
+        mensagens_autoria = _buscar_varios(
+            cursor, "SELECT * FROM mensagens_chamado WHERE autor_id = %s ORDER BY criado_em", (usuario_id,)
+        )
+        mensagens_chamados = _buscar_varios(
+            cursor,
+            f"SELECT * FROM mensagens_chamado WHERE chamado_id IN ({clausula_ids}) ORDER BY criado_em",
+            tuple(ids_chamados),
+        ) if ids_chamados else []
+        anexos_autoria = _buscar_varios(
+            cursor,
+            "SELECT id, chamado_id, autor_id, nome_arquivo, tipo_arquivo, conteudo, criado_em FROM anexos_chamado WHERE autor_id = %s ORDER BY criado_em",
+            (usuario_id,),
+        )
+        anexos_chamados = _buscar_varios(
+            cursor,
+            f"SELECT id, chamado_id, autor_id, nome_arquivo, tipo_arquivo, conteudo, criado_em FROM anexos_chamado WHERE chamado_id IN ({clausula_ids}) ORDER BY criado_em",
+            tuple(ids_chamados),
+        ) if ids_chamados else []
+        pesquisas = _buscar_varios(
+            cursor, f"SELECT * FROM pesquisas_satisfacao WHERE chamado_id IN ({clausula_ids}) ORDER BY respondido_em", tuple(ids_chamados)
+        ) if ids_chamados else []
+        atendimentos_ia = _buscar_varios(
+            cursor,
+            "SELECT * FROM atendimentos_ia WHERE usuario_id = %s OR chamado_id IN (" + clausula_ids + ") ORDER BY criado_em",
+            (usuario_id, *ids_chamados),
+        )
+        casos_ia = _buscar_varios(
+            cursor,
+            "SELECT * FROM base_casos_ia WHERE chamado_id IN (" + clausula_ids + ") OR analista_id = %s ORDER BY criado_em",
+            (*ids_chamados, usuario_id),
+        )
+        auditoria = _buscar_varios(
+            cursor,
+            """SELECT * FROM auditoria
+               WHERE usuario_id = %s OR (entidade = 'usuario' AND entidade_id = %s)
+               ORDER BY criado_em""",
+            (usuario_id, usuario_id),
+        )
+        codigos = _buscar_varios(
+            cursor,
+            "SELECT id, usuario_id, tipo, criado_em, expira_em, usado FROM codigos_verificacao WHERE usuario_id = %s ORDER BY criado_em",
+            (usuario_id,),
+        )
+
+        todos_anexos = {item["id"]: item for item in anexos_autoria + anexos_chamados}
+        anexos_metadados = []
+        for anexo in todos_anexos.values():
+            metadado = {k: v for k, v in anexo.items() if k != "conteudo"}
+            anexos_metadados.append(metadado)
+
+        dados = {
+            "gerado_em": datetime.now(),
+            "escopo": "Dados associados ao titular como solicitante, autor ou analista; chamados atendidos por ele são limitados a metadados para não expor dados de terceiros.",
+            "conta": conta,
+            "chamados_solicitados": chamados_solicitados,
+            "chamados_atendidos_metadados": chamados_atendidos,
+            "mensagens_de_autoria": mensagens_autoria,
+            "mensagens_dos_chamados_solicitados": mensagens_chamados,
+            "anexos": anexos_metadados,
+            "pesquisas_satisfacao": pesquisas,
+            "atendimentos_ia": atendimentos_ia,
+            "casos_ia": casos_ia,
+            "auditoria": auditoria,
+            "codigos_verificacao_metadados": codigos,
+        }
+        arquivo = io.BytesIO()
+        with zipfile.ZipFile(arquivo, "w", zipfile.ZIP_DEFLATED) as pacote:
+            pacote.writestr("dados.json", json.dumps(dados, ensure_ascii=False, default=_json_seguro, indent=2))
+            for anexo in todos_anexos.values():
+                nome_seguro = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(anexo["nome_arquivo"])) or "anexo"
+                pacote.writestr(f"anexos/{anexo['id']}_{nome_seguro}", anexo["conteudo"])
+        _registrar_auditoria(
+            cursor, autor_id, "DADOS_TITULAR_EXPORTADOS", "usuario", usuario_id,
+            detalhes={"anexos_exportados": len(todos_anexos)},
+        )
+        conn.commit()
+        return arquivo.getvalue()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def anonimizar_titular(usuario_id, autor_id=None):
+    """Anonimiza dados pessoais sem apagar métricas e eventos operacionais."""
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id, conta_anonimizada_em FROM usuarios WHERE id = %s", (usuario_id,))
+        usuario = cursor.fetchone()
+        if not usuario:
+            raise ValueError("Titular não encontrado.")
+        if usuario.get("conta_anonimizada_em"):
+            raise ValueError("Este titular já foi anonimizado.")
+
+        cursor.execute("SELECT id FROM chamados WHERE usuario_id = %s", (usuario_id,))
+        chamados_solicitados = [item["id"] for item in cursor.fetchall()]
+        clausula_ids = ", ".join(["%s"] * len(chamados_solicitados)) or "NULL"
+        parametros_ids = tuple(chamados_solicitados)
+
+        cursor.execute("DELETE FROM codigos_verificacao WHERE usuario_id = %s", (usuario_id,))
+        codigos_removidos = cursor.rowcount
+        cursor.execute(
+            "DELETE a FROM anexos_chamado a LEFT JOIN chamados c ON c.id = a.chamado_id "
+            "WHERE a.autor_id = %s OR c.usuario_id = %s",
+            (usuario_id, usuario_id),
+        )
+        anexos_removidos = cursor.rowcount
+        cursor.execute(
+            """UPDATE mensagens_chamado m LEFT JOIN chamados c ON c.id = m.chamado_id
+               SET m.mensagem = '[Conteúdo removido por solicitação de privacidade]',
+                   m.autor_nome = CASE WHEN m.autor_id = %s THEN 'Titular anonimizado' ELSE m.autor_nome END,
+                   m.autor_id = CASE WHEN m.autor_id = %s THEN NULL ELSE m.autor_id END
+               WHERE m.autor_id = %s OR c.usuario_id = %s""",
+            (usuario_id, usuario_id, usuario_id, usuario_id),
+        )
+        mensagens_anonimizadas = cursor.rowcount
+        cursor.execute(
+            f"DELETE FROM base_casos_ia WHERE chamado_id IN ({clausula_ids}) OR analista_id = %s",
+            (*parametros_ids, usuario_id),
+        )
+        casos_removidos = cursor.rowcount
+        if chamados_solicitados:
+            cursor.execute(f"DELETE FROM pesquisas_satisfacao WHERE chamado_id IN ({clausula_ids})", parametros_ids)
+            pesquisas_removidas = cursor.rowcount
+            cursor.execute(
+                f"""UPDATE atendimentos_ia
+                    SET usuario_id = NULL, chamado_id = NULL
+                    WHERE usuario_id = %s OR chamado_id IN ({clausula_ids})""",
+                (usuario_id, *parametros_ids),
+            )
+            atendimentos_anonimizados = cursor.rowcount
+            cursor.execute(
+                f"""UPDATE chamados
+                    SET usuario_id = NULL,
+                        titulo = '[Conteúdo removido por solicitação de privacidade]',
+                        descricao = '[Conteúdo removido por solicitação de privacidade]',
+                        motivo_cancelamento = NULL, diagnostico_final = NULL, solucao_final = NULL,
+                        compartilhar_conhecimento = FALSE, uso_ia_autorizado_em = NULL
+                    WHERE id IN ({clausula_ids})""",
+                parametros_ids,
+            )
+            chamados_anonimizados = cursor.rowcount
+        else:
+            pesquisas_removidas = atendimentos_anonimizados = chamados_anonimizados = 0
+
+        cursor.execute("UPDATE chamados SET analista_id = NULL WHERE analista_id = %s", (usuario_id,))
+        cursor.execute(
+            """UPDATE usuarios
+                SET nome = 'Titular anonimizado', sobrenome = NULL,
+                    email = %s, telefone = NULL, cpf_hash = NULL, departamento = NULL, departamento_id = NULL, cargo = NULL,
+                   totp_secret = NULL, senha_deve_ser_redefinida = TRUE,
+                   conta_anonimizada_em = %s
+               WHERE id = %s""",
+            (f"anonimo-{usuario_id}@local.invalid", datetime.now(), usuario_id),
+        )
+        _registrar_auditoria(
+            cursor, autor_id, "DADOS_TITULAR_ANONIMIZADOS", "usuario", usuario_id,
+            detalhes={
+                "chamados_anonimizados": chamados_anonimizados,
+                "mensagens_anonimizadas": mensagens_anonimizadas,
+                "anexos_removidos": anexos_removidos,
+                "pesquisas_removidas": pesquisas_removidas,
+                "casos_ia_removidos": casos_removidos,
+                "atendimentos_ia_anonimizados": atendimentos_anonimizados,
+                "codigos_removidos": codigos_removidos,
+            },
+        )
+        conn.commit()
+        return {
+            "chamados": chamados_anonimizados,
+            "mensagens": mensagens_anonimizadas,
+            "anexos": anexos_removidos,
+            "pesquisas": pesquisas_removidas,
+            "casos_ia": casos_removidos,
+            "atendimentos_ia": atendimentos_anonimizados,
+            "codigos": codigos_removidos,
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def atualizar_usuario(usuario_id, nome, email, papel, senha_hash=None, sobrenome=None,
-                      telefone=None, departamento=None, cargo=None, autor_id=None):
+                      telefone=None, cpf=None, departamento=None, departamento_id=None, cargo=None, autor_id=None):
+    cpf_hash = None
+    atualizar_cpf = bool(cpf)
+    if atualizar_cpf:
+        cpf_normalizado = normalizar_cpf(cpf)
+        if not cpf_normalizado:
+            raise ValueError("CPF inválido.")
+        cpf_hash = _hash_cpf(cpf_normalizado)
     conn = conectar()
     cursor = conn.cursor()
     if senha_hash:
-        cursor.execute(
-            """UPDATE usuarios SET nome = %s, sobrenome = %s, email = %s, papel = %s,
-               telefone = %s, departamento = %s, cargo = %s, senha_hash = %s WHERE id = %s""",
-            (nome, sobrenome, email, papel, telefone, departamento, cargo, senha_hash, usuario_id),
-        )
+        if atualizar_cpf:
+            cursor.execute(
+                """UPDATE usuarios SET nome = %s, sobrenome = %s, email = %s, papel = %s,
+                   telefone = %s, cpf_hash = %s, departamento = %s, departamento_id = %s, cargo = %s, senha_hash = %s WHERE id = %s""",
+                (nome, sobrenome, email, papel, telefone, cpf_hash, departamento, departamento_id, cargo, senha_hash, usuario_id),
+            )
+        else:
+            cursor.execute(
+                """UPDATE usuarios SET nome = %s, sobrenome = %s, email = %s, papel = %s,
+                   telefone = %s, departamento = %s, departamento_id = %s, cargo = %s, senha_hash = %s WHERE id = %s""",
+                (nome, sobrenome, email, papel, telefone, departamento, departamento_id, cargo, senha_hash, usuario_id),
+            )
     else:
-        cursor.execute(
-            """UPDATE usuarios SET nome = %s, sobrenome = %s, email = %s, papel = %s,
-               telefone = %s, departamento = %s, cargo = %s WHERE id = %s""",
-            (nome, sobrenome, email, papel, telefone, departamento, cargo, usuario_id),
-        )
+        if atualizar_cpf:
+            cursor.execute(
+                """UPDATE usuarios SET nome = %s, sobrenome = %s, email = %s, papel = %s,
+                   telefone = %s, cpf_hash = %s, departamento = %s, departamento_id = %s, cargo = %s WHERE id = %s""",
+                (nome, sobrenome, email, papel, telefone, cpf_hash, departamento, departamento_id, cargo, usuario_id),
+            )
+        else:
+            cursor.execute(
+                """UPDATE usuarios SET nome = %s, sobrenome = %s, email = %s, papel = %s,
+                   telefone = %s, departamento = %s, departamento_id = %s, cargo = %s WHERE id = %s""",
+                (nome, sobrenome, email, papel, telefone, departamento, departamento_id, cargo, usuario_id),
+            )
     linhas_afetadas = cursor.rowcount
     if linhas_afetadas:
         _registrar_auditoria(
@@ -1134,7 +1717,8 @@ def atualizar_senha(usuario_id, novo_hash_senha, autor_id=None):
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE usuarios SET senha_hash = %s WHERE id = %s", (novo_hash_senha, usuario_id)
+        "UPDATE usuarios SET senha_hash = %s, senha_deve_ser_redefinida = FALSE WHERE id = %s",
+        (novo_hash_senha, usuario_id),
     )
     _registrar_auditoria(cursor, autor_id or usuario_id, "SENHA_ALTERADA", "usuario", usuario_id)
     conn.commit()
@@ -1221,4 +1805,7 @@ if __name__ == "__main__":
     criar_tabela_mensagens()
     criar_tabela_anexos()
     criar_tabela_pesquisas_satisfacao()
+    criar_tabela_atendimentos_ia()
+    migrar_tabela_atendimentos_ia()
     criar_tabela_auditoria()
+    criar_tabelas_privacidade()

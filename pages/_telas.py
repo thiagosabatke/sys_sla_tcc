@@ -11,7 +11,8 @@ from ia_engine import (
 from rag import listar_artigos
 import sla
 from database import (
-    salvar_chamado, criar_tabela_usuarios, migrar_tabela_usuarios,
+    salvar_chamado, criar_tabela_departamentos, criar_tabela_usuarios, migrar_tabela_usuarios,
+    migrar_departamentos_usuarios, listar_departamentos, criar_departamento, atualizar_departamento,
     criar_tabela_chamados, migrar_tabela_chamados, criar_tabela_mensagens,
     criar_tabela_base_casos_ia, migrar_tabela_base_casos_ia,
     criar_tabela_codigos, listar_chamados, buscar_chamado_por_id,
@@ -21,13 +22,17 @@ from database import (
     buscar_usuario_por_email, atualizar_senha, salvar_totp_secret,
     salvar_codigo_verificacao, verificar_codigo, buscar_usuario_por_id,
     atualizar_usuario, excluir_usuario,
+    buscar_titular_por_identificador, buscar_usuario_por_cpf, normalizar_cpf,
+    exportar_dados_titular, anonimizar_titular,
     criar_tabela_anexos, salvar_anexo_chamado, listar_anexos_chamado,
     criar_tabela_pesquisas_satisfacao, buscar_pesquisa_satisfacao,
     salvar_pesquisa_satisfacao,
-    criar_tabela_atendimentos_ia, salvar_atendimento_ia,
+    criar_tabela_atendimentos_ia, migrar_tabela_atendimentos_ia, salvar_atendimento_ia,
     registrar_resultado_atendimento_ia, listar_atendimentos_ia,
     listar_casos_base_ia,
     criar_tabela_auditoria, registrar_auditoria, registrar_login,
+    criar_tabelas_privacidade, usuario_aceitou_politica, registrar_aceite_privacidade,
+    VERSAO_POLITICA_PRIVACIDADE,
     cancelar_chamado_sem_atribuicao,
     confirmar_resolucao_usuario,
     reabrir_chamado_usuario,
@@ -38,8 +43,10 @@ from auth import (
 )
 from email_utils import enviar_email
 
+criar_tabela_departamentos()
 criar_tabela_usuarios()
 migrar_tabela_usuarios()
+migrar_departamentos_usuarios()
 criar_tabela_chamados()
 migrar_tabela_chamados()
 criar_tabela_base_casos_ia()
@@ -49,7 +56,9 @@ criar_tabela_codigos()
 criar_tabela_anexos()
 criar_tabela_pesquisas_satisfacao()
 criar_tabela_atendimentos_ia()
+migrar_tabela_atendimentos_ia()
 criar_tabela_auditoria()
+criar_tabelas_privacidade()
 
 
 STATUS_OPCOES = ["Novo", "Em Andamento", "Em Espera", "Resolvido", "Fechado"]
@@ -274,6 +283,7 @@ ESTADO_INICIAL_SESSAO = {
     "admin_nav": "Usuários",
     "tela_atual": "login",
     "email_recuperacao": None,
+    "aceite_privacidade_validado": False,
     "chamado_selecionado_analista": None,
     "chamado_selecionado_historico": None,
     "chamado_selecionado_cancelado": None,
@@ -295,8 +305,7 @@ def tela_login():
     with col_meio:
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("### Sistema Inteligente de Chamados")
-        st.caption("Central de Serviços de TI - faça login para continuar")
-        st.caption("Os acessos e ações relevantes são auditados para segurança do serviço.")
+        st.caption("Entre com suas credenciais para continuar.")
 
         with st.container(border=True):
             with st.form("form_login"):
@@ -309,6 +318,9 @@ def tela_login():
                 if usuario is None:
                     registrar_auditoria(None, "LOGIN_FALHOU", "sessao", resultado="FALHA")
                     st.error("Email ou senha inválidos.")
+                elif usuario.get("senha_deve_ser_redefinida"):
+                    registrar_auditoria(usuario["id"], "LOGIN_BLOQUEADO_CREDENCIAL_INVALIDADA", "sessao", resultado="FALHA")
+                    st.warning("Esta credencial foi invalidada. Use “Esqueci minha senha” para definir uma nova senha.")
                 elif usuario["papel"] == "admin":
                     st.session_state.usuario_pendente_2fa = usuario
                     if not usuario.get("totp_secret"):
@@ -449,6 +461,7 @@ def sair():
         registrar_auditoria(usuario["id"], "LOGOUT_REALIZADO", "sessao")
     st.session_state.usuario_logado = None
     st.session_state.login_auditoria_registrada = False
+    st.session_state.aceite_privacidade_validado = False
     for chave in (
         "chat_mensagens", "chat_turnos_usuario", "chat_resultado_final", "chat_etapa",
         "chamado_aberto_usuario", "chamado_selecionado_analista",
@@ -630,8 +643,6 @@ def tela_usuario(usuario):
 
 
 def _aba_abrir_chamado(usuario):
-    st.caption("Envie sua mensagem. A IA analisa o caso em uma única etapa, pergunta apenas o necessário e sugere uma solução segura quando possível.")
-
     if "chat_mensagens" not in st.session_state:
         st.session_state.chat_mensagens = [
             {"role": "assistant", "content": "Olá! Como posso ajudar? Você pode tirar uma dúvida ou descrever um problema."}
@@ -663,7 +674,7 @@ def _aba_abrir_chamado(usuario):
                     st.rerun()
                 elif resultado["acao"] == "solucionar":
                     atendimento_ia_id = salvar_atendimento_ia(
-                        usuario["id"], resultado["titulo"], resultado["descricao"], resultado["solucao"],
+                        usuario["id"],
                     )
                     st.session_state.chat_mensagens.append({"role": "assistant", "content": resultado["mensagem"]})
                     st.session_state.chat_resultado_final = {
@@ -893,23 +904,29 @@ def _aba_meus_chamados(usuario, grupo):
                 st.markdown("##### Diagnóstico e solução registrados")
                 st.write(f"**Diagnóstico:** {chamado['diagnostico_final']}")
                 st.write(f"**Solução:** {chamado.get('solucao_final') or 'Não informada'}")
-            confirmar, reabrir = st.columns(2)
-            with confirmar:
-                if st.button("Confirmar solução", type="primary", key=f"fechar_{chamado['id']}"):
-                    try:
-                        confirmar_resolucao_usuario(chamado["id"], usuario["id"])
-                        st.success("Solução confirmada. Chamado fechado.")
-                    except ValueError as erro:
-                        st.error(str(erro))
-                    st.rerun()
-            with reabrir:
-                if st.button("Solicitar reabertura", key=f"reabrir_{chamado['id']}"):
-                    try:
-                        reabrir_chamado_usuario(chamado["id"], usuario["id"])
-                        st.success("Chamado reaberto e devolvido para atendimento.")
-                    except ValueError as erro:
-                        st.error(str(erro))
-                    st.rerun()
+            with st.form(f"form_confirmar_resolucao_{chamado['id']}"):
+                autoriza_uso_ia = st.checkbox(
+                    "Autorizo que uma versão sem identificadores diretos deste caso seja usada como referência interna pela IA para atender casos semelhantes.",
+                    value=False,
+                    help="A autorização é opcional e não afeta o fechamento do chamado.",
+                )
+                confirmar_solucao = st.form_submit_button("Confirmar solução", type="primary")
+            if confirmar_solucao:
+                try:
+                    confirmar_resolucao_usuario(
+                        chamado["id"], usuario["id"], autoriza_uso_ia=autoriza_uso_ia,
+                    )
+                    st.success("Solução confirmada. Chamado fechado.")
+                except ValueError as erro:
+                    st.error(str(erro))
+                st.rerun()
+            if st.button("Solicitar reabertura", key=f"reabrir_{chamado['id']}"):
+                try:
+                    reabrir_chamado_usuario(chamado["id"], usuario["id"])
+                    st.success("Chamado reaberto e devolvido para atendimento.")
+                except ValueError as erro:
+                    st.error(str(erro))
+                st.rerun()
 
         painel_pesquisa_satisfacao(chamado, usuario)
 
@@ -1529,10 +1546,155 @@ def fechar_perfil_usuario_admin():
 
 
 def excluir_perfil_usuario_admin(usuario_id, admin_id):
-    excluir_usuario(usuario_id, autor_id=admin_id)
+    anonimizar_titular(usuario_id, autor_id=admin_id)
     st.session_state.usuario_admin_aberto = None
     st.session_state.admin_nav = "Usuários"
-    st.session_state.mensagem_admin = "Usuário excluído."
+    st.session_state.mensagem_admin = "Usuário anonimizado; o histórico técnico foi preservado sem identificadores diretos."
+
+
+def painel_privacidade_admin(admin):
+    st.markdown("### Direitos do titular")
+    st.caption("Consulte o titular por e-mail ou CPF. A busca por CPF é exata e o número completo não é exibido.")
+    identificador = st.text_input("E-mail ou CPF do titular", key="privacidade_identificador")
+    if not st.button("Localizar titular", type="primary", key="privacidade_localizar"):
+        return
+
+    try:
+        titular, erro = buscar_titular_por_identificador(identificador)
+    except ValueError as erro:
+        st.error(str(erro))
+        return
+    if erro:
+        st.warning(erro)
+        return
+
+    st.session_state.titular_privacidade_id = titular["id"]
+    st.rerun()
+
+
+def tela_aceite_privacidade(usuario):
+    injetar_css()
+    col_esq, col_meio, col_dir = st.columns([1, 1.5, 1])
+    with col_meio:
+        st.markdown("### Privacidade e uso do sistema")
+        st.caption(f"Política de privacidade — versão {VERSAO_POLITICA_PRIVACIDADE}")
+        st.write("Leia a política de privacidade antes de continuar.")
+        caminho_politica = Path(__file__).resolve().parent.parent / "PRIVACIDADE.md"
+        try:
+            with st.expander("Ler a política de privacidade", expanded=True):
+                st.markdown(caminho_politica.read_text(encoding="utf-8"))
+        except OSError:
+            st.error("A política de privacidade não está disponível. Contate o administrador.")
+            return
+        with st.form("form_aceite_privacidade"):
+            aceito = st.checkbox(
+                "Li e aceito fornecer os dados pessoais necessários ao uso do sistema, "
+                "ciente de que serão tratados conforme este Aviso de Privacidade e a "
+                "Lei nº 13.709/2018 (LGPD)."
+            )
+            confirmar = st.form_submit_button("Aceitar e continuar", type="primary", use_container_width=True)
+        if confirmar:
+            if not aceito:
+                st.warning("Para continuar, confirme a leitura e o aceite do Aviso de Privacidade.")
+            else:
+                registrar_aceite_privacidade(usuario["id"], "uso_do_sistema")
+                st.session_state.aceite_privacidade_validado = True
+                st.rerun()
+
+
+def acoes_privacidade_admin(admin):
+    titular_id = st.session_state.get("titular_privacidade_id")
+    if not titular_id:
+        return
+    titular = buscar_usuario_por_id(titular_id)
+    if not titular:
+        st.session_state.pop("titular_privacidade_id", None)
+        return
+
+    st.divider()
+    st.markdown(f"#### Titular localizado: {titular['email']}")
+    if titular.get("conta_anonimizada_em"):
+        st.info("Esta conta já foi anonimizada.")
+        return
+
+    chave_exportacao = f"privacidade_exportacao_{titular_id}"
+    if st.button("Gerar arquivo de acesso", key=f"privacidade_gerar_{titular_id}"):
+        try:
+            st.session_state[chave_exportacao] = exportar_dados_titular(titular_id, autor_id=admin["id"])
+        except ValueError as erro:
+            st.error(str(erro))
+    if chave_exportacao in st.session_state:
+        st.download_button(
+            "Baixar arquivo de acesso (ZIP)",
+            data=st.session_state[chave_exportacao],
+            file_name=f"dados_titular_{titular_id}.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+    st.caption("O arquivo contém os dados acessíveis do titular e anexos. Senha, segredo TOTP e códigos não são exportados.")
+
+    confirmar = st.checkbox(
+        "Confirmo a anonimização permanente: conteúdo de chamados, mensagens, anexos e dados derivados serão removidos ou anonimizados; métricas e auditoria técnica permanecerão.",
+        key=f"privacidade_confirmar_{titular_id}",
+    )
+    if st.button("Anonimizar dados do titular", type="primary", disabled=not confirmar, key=f"privacidade_anonimizar_{titular_id}"):
+        try:
+            resumo = anonimizar_titular(titular_id, autor_id=admin["id"])
+            st.success(
+                f"Dados anonimizados: {resumo['chamados']} chamado(s), {resumo['mensagens']} mensagem(ns), "
+                f"{resumo['anexos']} anexo(s) e {resumo['casos_ia']} caso(s) de IA."
+            )
+            st.session_state.pop("titular_privacidade_id", None)
+        except ValueError as erro:
+            st.error(str(erro))
+
+
+def painel_departamentos_admin(admin):
+    st.markdown("### Departamentos")
+    st.caption("Organize a estrutura da empresa. Departamentos inativos são preservados no histórico e não aparecem em novos cadastros.")
+
+    with st.expander("Cadastrar departamento", expanded=False):
+        with st.form("form_novo_departamento", clear_on_submit=True):
+            nome = st.text_input("Nome do departamento")
+            descricao = st.text_input("Descrição (opcional)")
+            cadastrar = st.form_submit_button("Cadastrar departamento", type="primary")
+        if cadastrar:
+            try:
+                criar_departamento(nome, descricao, autor_id=admin["id"])
+                st.success("Departamento cadastrado.")
+                st.rerun()
+            except ValueError as erro:
+                st.error(str(erro))
+
+    departamentos = listar_departamentos()
+    if not departamentos:
+        st.info("Nenhum departamento cadastrado.")
+        return
+
+    tabela = pd.DataFrame(departamentos)[["nome", "descricao", "ativo", "total_usuarios"]].copy()
+    tabela.columns = ["Nome", "Descrição", "Ativo", "Usuários vinculados"]
+    tabela["Ativo"] = tabela["Ativo"].map({True: "Sim", False: "Não"})
+    st.dataframe(tabela, use_container_width=True, hide_index=True)
+
+    por_id = {departamento["id"]: departamento for departamento in departamentos}
+    departamento_id = st.selectbox(
+        "Editar departamento",
+        options=list(por_id),
+        format_func=lambda item: por_id[item]["nome"],
+    )
+    departamento = por_id[departamento_id]
+    with st.form(f"form_editar_departamento_{departamento_id}"):
+        nome = st.text_input("Nome", value=departamento["nome"])
+        descricao = st.text_input("Descrição", value=departamento.get("descricao") or "")
+        ativo = st.checkbox("Departamento ativo", value=bool(departamento["ativo"]))
+        salvar = st.form_submit_button("Salvar departamento", type="primary")
+    if salvar:
+        try:
+            atualizar_departamento(departamento_id, nome, descricao, ativo, autor_id=admin["id"])
+            st.success("Departamento atualizado.")
+            st.rerun()
+        except ValueError as erro:
+            st.error(str(erro))
 
 
 def painel_perfil_usuario_admin(admin):
@@ -1550,6 +1712,14 @@ def painel_perfil_usuario_admin(admin):
 
     with st.container(border=True):
         st.caption("Dados de identificação e vínculo organizacional. Campos adicionais são opcionais.")
+        departamentos = listar_departamentos()
+        departamentos_por_id = {departamento["id"]: departamento for departamento in departamentos}
+        departamento_atual_id = conta.get("departamento_id")
+        opcoes_departamento = [None] + [
+            departamento["id"]
+            for departamento in departamentos
+            if departamento["ativo"] or departamento["id"] == departamento_atual_id
+        ]
         with st.form(f"form_editar_usuario_{conta['id']}"):
             col1, col2 = st.columns(2)
             with col1:
@@ -1557,39 +1727,69 @@ def painel_perfil_usuario_admin(admin):
                 novo_sobrenome = st.text_input("Sobrenome", value=conta.get("sobrenome") or "")
                 novo_email = st.text_input("E-mail", value=conta["email"])
                 novo_telefone = st.text_input("Telefone", value=conta.get("telefone") or "")
+                novo_cpf = st.text_input(
+                    "CPF (opcional)",
+                    help="Informe somente para cadastrar ou substituir o CPF. O número não será exibido após o salvamento.",
+                )
+                if conta.get("cpf_hash"):
+                    st.caption("CPF cadastrado com proteção para busca exata.")
             with col2:
                 novo_papel = st.selectbox(
                     "Perfil de acesso", ["usuario", "analista", "admin"],
                     index=["usuario", "analista", "admin"].index(conta["papel"]),
                 )
-                novo_departamento = st.text_input("Departamento", value=conta.get("departamento") or "")
+                novo_departamento_id = st.selectbox(
+                    "Departamento",
+                    options=opcoes_departamento,
+                    index=opcoes_departamento.index(departamento_atual_id) if departamento_atual_id in opcoes_departamento else 0,
+                    format_func=lambda item: "Não informado" if item is None else departamentos_por_id[item]["nome"],
+                )
                 novo_cargo = st.text_input("Cargo", value=conta.get("cargo") or "")
                 nova_senha = st.text_input("Nova senha (opcional)", type="password")
             salvar = st.form_submit_button("Salvar alterações", type="primary")
 
         if salvar:
             outro_usuario = buscar_usuario_por_email(novo_email)
+            outro_cpf = None
+            erro_cpf = None
+            if novo_cpf and normalizar_cpf(novo_cpf):
+                try:
+                    outro_cpf = buscar_usuario_por_cpf(novo_cpf)
+                except ValueError as erro:
+                    erro_cpf = str(erro)
             if not novo_nome or not novo_sobrenome or not novo_email:
                 st.warning("Nome, sobrenome e e-mail são obrigatórios.")
+            elif novo_cpf and not normalizar_cpf(novo_cpf):
+                st.warning("Informe um CPF válido.")
+            elif erro_cpf:
+                st.error(erro_cpf)
             elif outro_usuario and outro_usuario["id"] != conta["id"]:
                 st.error("Já existe uma conta com esse e-mail.")
+            elif outro_cpf and outro_cpf["id"] != conta["id"]:
+                st.error("Já existe uma conta com esse CPF.")
             else:
-                atualizar_usuario(
-                    conta["id"], novo_nome, novo_email, novo_papel,
-                    senha_hash=gerar_hash_senha(nova_senha) if nova_senha else None,
-                    sobrenome=novo_sobrenome, telefone=novo_telefone,
-                    departamento=novo_departamento, cargo=novo_cargo,
-                    autor_id=admin["id"],
-                )
-                st.success("Perfil atualizado.")
-                st.rerun()
+                try:
+                    novo_departamento = (
+                        departamentos_por_id[novo_departamento_id]["nome"] if novo_departamento_id else None
+                    )
+                    atualizar_usuario(
+                        conta["id"], novo_nome, novo_email, novo_papel,
+                        senha_hash=gerar_hash_senha(nova_senha) if nova_senha else None,
+                        sobrenome=novo_sobrenome, telefone=novo_telefone, cpf=novo_cpf or None,
+                        departamento=novo_departamento, departamento_id=novo_departamento_id, cargo=novo_cargo,
+                        autor_id=admin["id"],
+                    )
+                    st.success("Perfil atualizado.")
+                    st.rerun()
+                except ValueError as erro:
+                    st.error(str(erro))
 
     acoes, fechar = st.columns(2)
     with acoes:
         if conta["id"] != admin["id"]:
-            confirmar_exclusao = st.checkbox("Confirmo a exclusão permanente desta conta.")
+            confirmar_exclusao = st.checkbox("Confirmo a anonimização permanente desta conta e de seus dados associados.")
             st.button(
-                "Excluir usuário", disabled=not confirmar_exclusao,
+                "Anonimizar usuário", disabled=not confirmar_exclusao,
                 on_click=excluir_perfil_usuario_admin,
                 args=(conta["id"], admin["id"]),
             )
@@ -1608,7 +1808,7 @@ def tela_admin(usuario):
     n_analistas = sum(1 for u in usuarios if u["papel"] == "analista")
     n_admins = sum(1 for u in usuarios if u["papel"] == "admin")
 
-    opcoes_navegacao = ["Usuários", "Dashboards"]
+    opcoes_navegacao = ["Usuários", "Departamentos", "Dashboards", "Privacidade"]
     if st.session_state.get("usuario_admin_aberto"):
         opcoes_navegacao.append("Perfil do usuário")
     navegacao = st.radio("Navegação administrativa", opcoes_navegacao, horizontal=True, key="admin_nav")
@@ -1627,38 +1827,69 @@ def tela_admin(usuario):
         st.divider()
         relatorio_cancelamentos(chamados)
 
+    if navegacao == "Privacidade":
+        painel_privacidade_admin(usuario)
+        acoes_privacidade_admin(usuario)
+
+    if navegacao == "Departamentos":
+        painel_departamentos_admin(usuario)
+
     if navegacao == "Usuários":
         if st.session_state.get("mensagem_admin"):
             st.success(st.session_state.pop("mensagem_admin"))
         with st.expander("Cadastrar usuário", expanded=False):
             with st.form("form_novo_usuario", clear_on_submit=True):
+                departamentos_ativos = listar_departamentos(apenas_ativos=True)
+                departamentos_por_id = {departamento["id"]: departamento for departamento in departamentos_ativos}
                 col1, col2 = st.columns(2)
                 with col1:
                     nome = st.text_input("Nome")
                     sobrenome = st.text_input("Sobrenome")
                     senha = st.text_input("Senha", type="password")
                     telefone = st.text_input("Telefone (opcional)")
+                    cpf = st.text_input("CPF (opcional)", help="Usado apenas para identificação e busca de privacidade.")
                 with col2:
                     email = st.text_input("E-mail")
                     papel = st.selectbox("Perfil", options=["usuario", "analista", "admin"])
-                    departamento = st.text_input("Departamento (opcional)")
+                    departamento_id = st.selectbox(
+                        "Departamento",
+                        options=[None] + list(departamentos_por_id),
+                        format_func=lambda item: "Não informado" if item is None else departamentos_por_id[item]["nome"],
+                    )
                     cargo = st.text_input("Cargo (opcional)")
                 cadastrar = st.form_submit_button("Cadastrar", type="primary")
 
             if cadastrar:
+                outro_cpf = None
+                erro_cpf = None
+                if cpf and normalizar_cpf(cpf):
+                    try:
+                        outro_cpf = buscar_usuario_por_cpf(cpf)
+                    except ValueError as erro:
+                        erro_cpf = str(erro)
                 if not nome or not sobrenome or not email or not senha:
                     st.warning("Nome, sobrenome, e-mail e senha são obrigatórios.")
+                elif cpf and not normalizar_cpf(cpf):
+                    st.warning("Informe um CPF válido.")
+                elif erro_cpf:
+                    st.error(erro_cpf)
                 elif buscar_usuario_por_email(email):
                     st.error("Já existe um usuário cadastrado com esse e-mail.")
+                elif outro_cpf:
+                    st.error("Já existe uma conta com esse CPF.")
                 else:
-                    criar_usuario(
-                        nome, email, gerar_hash_senha(senha), papel,
-                        sobrenome=sobrenome, telefone=telefone or None,
-                        departamento=departamento or None, cargo=cargo or None,
-                        autor_id=usuario["id"],
-                    )
-                    st.success(f"Usuário {email} cadastrado como '{papel}'.")
-                    st.rerun()
+                    try:
+                        departamento = departamentos_por_id[departamento_id]["nome"] if departamento_id else None
+                        criar_usuario(
+                            nome, email, gerar_hash_senha(senha), papel,
+                            sobrenome=sobrenome, telefone=telefone or None, cpf=cpf or None,
+                            departamento=departamento, departamento_id=departamento_id, cargo=cargo or None,
+                            autor_id=usuario["id"],
+                        )
+                        st.success(f"Usuário {email} cadastrado como '{papel}'.")
+                        st.rerun()
+                    except ValueError as erro:
+                        st.error(str(erro))
 
         if usuarios:
             filtro_usuario = st.text_input("Buscar por nome, e-mail ou perfil", key="filtro_usuarios").strip().lower()
@@ -1766,6 +1997,12 @@ def executar_aplicacao(pagina_solicitada=None):
     if not st.session_state.login_auditoria_registrada:
         registrar_login(usuario["id"])
         st.session_state.login_auditoria_registrada = True
+
+    if not st.session_state.aceite_privacidade_validado:
+        if not usuario_aceitou_politica(usuario["id"]):
+            tela_aceite_privacidade(usuario)
+            return
+        st.session_state.aceite_privacidade_validado = True
 
     if pagina_solicitada is None:
         pagina_permitida = PAGINAS_POR_PAPEL.get(usuario["papel"])
