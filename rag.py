@@ -147,7 +147,6 @@ def _similaridade_cosseno(a, b):
 
 
 def buscar_contexto(texto_chamado, top_k=3, tipo=None):
-    # Recarrega para incorporar novos casos confirmados imediatamente.
     carregar_base()
     if _vetores is None:
         return []

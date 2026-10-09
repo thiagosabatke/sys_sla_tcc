@@ -6,6 +6,7 @@ import re
 import zipfile
 import hashlib
 import hmac
+import uuid
 from datetime import datetime
 import mysql.connector
 from dotenv import load_dotenv
@@ -29,7 +30,52 @@ TRANSICOES_STATUS = {
 CATEGORIAS_VALIDAS = {"Acesso", "Software", "Hardware", "Rede", "Outros"}
 URGENCIAS_VALIDAS = {"Baixa", "Media", "Alta", "Critica"}
 EQUIPES_VALIDAS = {"Suporte", "Software", "Hardware", "Redes"}
-VERSAO_POLITICA_PRIVACIDADE = os.getenv("POLITICA_PRIVACIDADE_VERSAO", "1.1.0")
+VERSAO_POLITICA_PRIVACIDADE = os.getenv("POLITICA_PRIVACIDADE_VERSAO", "1.2.0")
+
+PERFIS_PADRAO_RBAC = (
+    ("administrador", "Administrador", "Acesso administrativo completo ao sistema.", True),
+    ("analista", "Analista", "Atendimento e tratamento operacional de chamados.", True),
+    ("usuario", "Usuário", "Abertura e acompanhamento dos próprios chamados.", True),
+)
+
+PERMISSOES_PADRAO_RBAC = (
+    ("conhecimento.visualizar", "Acessar central de ajuda", "Consultar orientações e procedimentos antes de abrir um chamado.", "Conhecimento"),
+    ("ia.utilizar", "Usar assistente de IA", "Usar a conversa com IA para orientar ou preparar a abertura de chamados.", "IA"),
+    ("chamados.visualizar_proprios", "Acessar meus chamados", "Consultar chamados abertos pela própria pessoa.", "Chamados"),
+    ("chamados.abrir", "Abrir chamados", "Criar novos chamados.", "Chamados"),
+    ("chamados.responder_proprios", "Responder próprios chamados", "Enviar mensagens nos próprios chamados.", "Chamados"),
+    ("chamados.anexar_proprios", "Anexar em próprios chamados", "Adicionar anexos aos próprios chamados.", "Chamados"),
+    ("chamados.cancelar_proprios", "Cancelar próprios chamados", "Cancelar chamados próprios ainda elegíveis.", "Chamados"),
+    ("chamados.confirmar_resolucao", "Confirmar resolução", "Confirmar ou solicitar reabertura de chamados próprios.", "Chamados"),
+    ("chamados.visualizar_fila", "Visualizar fila de atendimento", "Consultar chamados disponíveis e históricos operacionais.", "Chamados"),
+    ("chamados.assumir", "Assumir chamados", "Assumir chamados novos para atendimento.", "Chamados"),
+    ("chamados.responder_atribuidos", "Responder chamados atribuídos", "Enviar mensagens nos chamados atribuídos a si.", "Chamados"),
+    ("chamados.anexar_atribuidos", "Anexar em chamados atribuídos", "Adicionar anexos aos chamados atribuídos a si.", "Chamados"),
+    ("chamados.alterar_status", "Alterar status de chamados", "Executar mudanças de status permitidas pelo fluxo existente.", "Chamados"),
+    ("chamados.registrar_resolucao", "Registrar resolução", "Registrar diagnóstico e solução em chamados atribuídos.", "Chamados"),
+    ("chamados.cancelar_fila", "Cancelar chamados da fila", "Cancelar chamados novos elegíveis da fila de atendimento.", "Chamados"),
+    ("usuarios.visualizar", "Visualizar usuários", "Consultar contas cadastradas.", "Administração"),
+    ("usuarios.gerenciar", "Gerenciar usuários", "Cadastrar e editar contas de usuários.", "Administração"),
+    ("departamentos.gerenciar", "Gerenciar departamentos", "Cadastrar e editar departamentos.", "Administração"),
+    ("privacidade.gerenciar", "Gerenciar privacidade", "Atender solicitações de privacidade de titulares.", "Administração"),
+    ("relatorios.visualizar", "Visualizar relatórios", "Acessar dashboards e relatórios administrativos.", "Administração"),
+    ("perfis.gerenciar", "Gerenciar perfis e permissões", "Criar, editar e administrar perfis de acesso.", "Administração"),
+    ("administracao.acessar", "Acessar administração", "Acessar a área administrativa do sistema.", "Administração"),
+)
+
+PERMISSOES_POR_PERFIL_PADRAO = {
+    "administrador": {item[0] for item in PERMISSOES_PADRAO_RBAC},
+    "analista": {
+        "conhecimento.visualizar", "chamados.visualizar_fila", "chamados.assumir",
+        "chamados.responder_atribuidos", "chamados.anexar_atribuidos", "chamados.alterar_status",
+        "chamados.registrar_resolucao", "chamados.cancelar_fila",
+    },
+    "usuario": {
+        "conhecimento.visualizar", "ia.utilizar", "chamados.visualizar_proprios", "chamados.abrir",
+        "chamados.responder_proprios", "chamados.anexar_proprios", "chamados.cancelar_proprios",
+        "chamados.confirmar_resolucao",
+    },
+}
 
 
 def status_disponiveis(status_atual):
@@ -275,6 +321,438 @@ def criar_tabela_departamentos():
     conn.close()
 
 
+def criar_tabelas_rbac():
+    """Cria a estrutura de perfis e permissões sem alterar os dados existentes."""
+    conn = conectar()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS perfis (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                chave VARCHAR(60) NOT NULL UNIQUE,
+                nome VARCHAR(100) NOT NULL UNIQUE,
+                descricao VARCHAR(255) NULL,
+                sistema BOOLEAN NOT NULL DEFAULT FALSE,
+                ativo BOOLEAN NOT NULL DEFAULT TRUE,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS permissoes (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                codigo VARCHAR(100) NOT NULL UNIQUE,
+                nome VARCHAR(120) NOT NULL,
+                descricao VARCHAR(255) NOT NULL,
+                modulo VARCHAR(60) NOT NULL,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS perfil_permissoes (
+                perfil_id INT NOT NULL,
+                permissao_id INT NOT NULL,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (perfil_id, permissao_id),
+                CONSTRAINT fk_perfil_permissoes_perfil
+                    FOREIGN KEY (perfil_id) REFERENCES perfis(id) ON DELETE CASCADE,
+                CONSTRAINT fk_perfil_permissoes_permissao
+                    FOREIGN KEY (permissao_id) REFERENCES permissoes(id) ON DELETE CASCADE
+            )
+        """)
+        for chave, nome, descricao, sistema in PERFIS_PADRAO_RBAC:
+            cursor.execute(
+                """INSERT IGNORE INTO perfis (chave, nome, descricao, sistema, ativo)
+                   VALUES (%s, %s, %s, %s, TRUE)""",
+                (chave, nome, descricao, sistema),
+            )
+        for codigo, nome, descricao, modulo in PERMISSOES_PADRAO_RBAC:
+            cursor.execute(
+                """INSERT INTO permissoes (codigo, nome, descricao, modulo)
+                   VALUES (%s, %s, %s, %s)
+                   ON DUPLICATE KEY UPDATE nome = VALUES(nome), descricao = VALUES(descricao), modulo = VALUES(modulo)""",
+                (codigo, nome, descricao, modulo),
+            )
+        for chave_perfil, codigos in PERMISSOES_POR_PERFIL_PADRAO.items():
+            for codigo_permissao in codigos:
+                cursor.execute(
+                    """INSERT IGNORE INTO perfil_permissoes (perfil_id, permissao_id)
+                       SELECT p.id, pm.id
+                       FROM perfis p CROSS JOIN permissoes pm
+                       WHERE p.chave = %s AND pm.codigo = %s""",
+                    (chave_perfil, codigo_permissao),
+                )
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _perfil_padrao_id(cursor, papel_legado):
+    chave = {"admin": "administrador", "analista": "analista"}.get(papel_legado, "usuario")
+    cursor.execute("SELECT id FROM perfis WHERE chave = %s", (chave,))
+    perfil = cursor.fetchone()
+    if not perfil:
+        raise ValueError("Perfis RBAC não foram inicializados.")
+    return perfil[0]
+
+
+def _papel_compativel_perfil(cursor, perfil_id):
+    """Mantém o campo legado papel sincronizado sem usá-lo para autorizar acessos."""
+    cursor.execute("SELECT chave, ativo FROM perfis WHERE id = %s", (perfil_id,))
+    perfil = cursor.fetchone()
+    if not perfil:
+        raise ValueError("Perfil não encontrado.")
+    if not perfil[1]:
+        raise ValueError("Não é possível atribuir um perfil inativo.")
+    if perfil[0] == "administrador":
+        return "admin"
+    cursor.execute(
+        """SELECT 1 FROM perfil_permissoes pp
+           JOIN permissoes pm ON pm.id = pp.permissao_id
+           WHERE pp.perfil_id = %s AND pm.codigo = 'chamados.visualizar_fila'""",
+        (perfil_id,),
+    )
+    return "analista" if cursor.fetchone() else "usuario"
+
+
+def permissoes_usuario(usuario_id):
+    """Retorna as permissões efetivas do usuário a partir do perfil RBAC vinculado."""
+    if not usuario_id:
+        return set()
+    conn = conectar()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """SELECT p.chave FROM usuarios u
+               JOIN perfis p ON p.id = u.perfil_id
+               WHERE u.id = %s AND u.conta_anonimizada_em IS NULL AND p.ativo = TRUE""",
+            (usuario_id,),
+        )
+        perfil = cursor.fetchone()
+        if not perfil:
+            return set()
+        if perfil[0] == "administrador":
+            return {item[0] for item in PERMISSOES_PADRAO_RBAC}
+        cursor.execute(
+            """SELECT pm.codigo FROM usuarios u
+               JOIN perfil_permissoes pp ON pp.perfil_id = u.perfil_id
+               JOIN permissoes pm ON pm.id = pp.permissao_id
+               WHERE u.id = %s""",
+            (usuario_id,),
+        )
+        return {linha[0] for linha in cursor.fetchall()}
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def usuario_tem_permissao(usuario_id, permissao):
+    return permissao in permissoes_usuario(usuario_id)
+
+
+def exigir_permissao(usuario_id, permissao):
+    if not usuario_tem_permissao(usuario_id, permissao):
+        raise PermissionError("Você não tem permissão para executar esta ação.")
+
+
+def _validar_dependencia_administrativa(cursor, permissao_ids):
+    """Impede permissões administrativas sem o acesso à área correspondente."""
+    permissao_ids = set(permissao_ids or [])
+    if not permissao_ids:
+        return
+    marcadores = ", ".join(["%s"] * len(permissao_ids))
+    cursor.execute(
+        f"SELECT id, codigo, modulo FROM permissoes WHERE id IN ({marcadores})",
+        tuple(permissao_ids),
+    )
+    permissoes = cursor.fetchall()
+    if len(permissoes) != len(permissao_ids):
+        raise ValueError("Uma ou mais permissões selecionadas não existem.")
+    def campo(permissao, nome, indice):
+        return permissao[nome] if isinstance(permissao, dict) else permissao[indice]
+
+    codigos = {campo(permissao, "codigo", 1) for permissao in permissoes}
+    possui_permissao_administrativa = any(
+        campo(permissao, "modulo", 2) == "Administração"
+        and campo(permissao, "codigo", 1) != "administracao.acessar"
+        for permissao in permissoes
+    )
+    if possui_permissao_administrativa and "administracao.acessar" not in codigos:
+        raise ValueError(
+            "Marque 'Acessar administração' antes de conceder outras permissões administrativas."
+        )
+    dependencias = {
+        "chamados.visualizar_proprios": {
+            "conhecimento.visualizar", "ia.utilizar", "chamados.abrir",
+            "chamados.responder_proprios", "chamados.anexar_proprios",
+            "chamados.cancelar_proprios", "chamados.confirmar_resolucao",
+        },
+        "chamados.visualizar_fila": {
+            "chamados.assumir", "chamados.responder_atribuidos",
+            "chamados.anexar_atribuidos", "chamados.alterar_status",
+            "chamados.registrar_resolucao", "chamados.cancelar_fila",
+        },
+    }
+    for permissao_base, permissoes_dependentes in dependencias.items():
+        if codigos.intersection(permissoes_dependentes) and permissao_base not in codigos:
+            raise ValueError(
+                "Marque a permissão de acesso do grupo antes de conceder suas ações adicionais."
+            )
+
+
+def usuario_eh_administrador(usuario_id):
+    if not usuario_id:
+        return False
+    conn = conectar()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """SELECT 1 FROM usuarios u JOIN perfis p ON p.id = u.perfil_id
+               WHERE u.id = %s AND u.conta_anonimizada_em IS NULL
+                 AND p.chave = 'administrador' AND p.ativo = TRUE""",
+            (usuario_id,),
+        )
+        return cursor.fetchone() is not None
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def exigir_gerenciamento_perfis(usuario_id):
+    """Restringe a gestão de perfis à permissão RBAC correspondente."""
+    exigir_permissao(usuario_id, "perfis.gerenciar")
+
+
+def _perfil_administrador_usuario(cursor, usuario_id):
+    cursor.execute(
+        """SELECT 1 FROM usuarios u JOIN perfis p ON p.id = u.perfil_id
+           WHERE u.id = %s AND u.conta_anonimizada_em IS NULL
+             AND p.chave = 'administrador' AND p.ativo = TRUE""",
+        (usuario_id,),
+    )
+    return cursor.fetchone() is not None
+
+
+def _proteger_ultimo_administrador(cursor, usuario_id, operacao):
+    """Bloqueia mudanças que deixariam o sistema sem uma conta administrativa ativa."""
+    if not _perfil_administrador_usuario(cursor, usuario_id):
+        return
+    cursor.execute(
+        """SELECT u.id FROM usuarios u JOIN perfis p ON p.id = u.perfil_id
+           WHERE u.conta_anonimizada_em IS NULL
+             AND p.chave = 'administrador' AND p.ativo = TRUE
+           FOR UPDATE"""
+    )
+    if len(cursor.fetchall()) <= 1:
+        raise ValueError(
+            f"Não é possível {operacao}: esta é a última conta administrativa ativa do sistema."
+        )
+
+
+def listar_permissoes(executor_id):
+    exigir_gerenciamento_perfis(executor_id)
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id, codigo, nome, descricao, modulo FROM permissoes ORDER BY modulo, nome")
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def listar_perfis(executor_id):
+    exigir_gerenciamento_perfis(executor_id)
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            """SELECT p.id, p.chave, p.nome, p.descricao, p.sistema, p.ativo,
+                      COUNT(DISTINCT u.id) AS total_usuarios,
+                      COUNT(DISTINCT pp.permissao_id) AS total_permissoes
+               FROM perfis p
+               LEFT JOIN usuarios u ON u.perfil_id = p.id
+               LEFT JOIN perfil_permissoes pp ON pp.perfil_id = p.id
+               GROUP BY p.id, p.chave, p.nome, p.descricao, p.sistema, p.ativo
+               ORDER BY p.sistema DESC, p.nome"""
+        )
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def listar_perfis_para_atribuicao(executor_id, incluir_inativos=False):
+    """Perfis que um gestor de usuários pode atribuir sem delegar administração total."""
+    exigir_permissao(executor_id, "usuarios.gerenciar")
+    administrador = usuario_eh_administrador(executor_id)
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        filtros = []
+        if not incluir_inativos:
+            filtros.append("p.ativo = TRUE")
+        if not administrador:
+            filtros.append("p.chave <> 'administrador'")
+        clausula = f" WHERE {' AND '.join(filtros)}" if filtros else ""
+        cursor.execute(
+            "SELECT p.id, p.chave, p.nome, p.descricao, p.sistema, p.ativo "
+            f"FROM perfis p{clausula} ORDER BY p.sistema DESC, p.nome",
+        )
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def permissoes_do_perfil(perfil_id, executor_id):
+    exigir_gerenciamento_perfis(executor_id)
+    conn = conectar()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT permissao_id FROM perfil_permissoes WHERE perfil_id = %s",
+            (perfil_id,),
+        )
+        return {linha[0] for linha in cursor.fetchall()}
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def criar_perfil(nome, descricao, permissao_ids, autor_id):
+    exigir_gerenciamento_perfis(autor_id)
+    nome = (nome or "").strip()
+    if not nome:
+        raise ValueError("Informe o nome do perfil.")
+    conn = conectar()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id FROM perfis WHERE nome = %s", (nome,))
+        if cursor.fetchone():
+            raise ValueError("Já existe um perfil com esse nome.")
+        permissao_ids = set(permissao_ids or [])
+        _validar_dependencia_administrativa(cursor, permissao_ids)
+        chave = f"custom-{uuid.uuid4().hex}"
+        cursor.execute(
+            "INSERT INTO perfis (chave, nome, descricao, sistema, ativo) VALUES (%s, %s, %s, FALSE, TRUE)",
+            (chave, nome, (descricao or "").strip() or None),
+        )
+        perfil_id = cursor.lastrowid
+        for permissao_id in permissao_ids:
+            cursor.execute(
+                "INSERT INTO perfil_permissoes (perfil_id, permissao_id) VALUES (%s, %s)",
+                (perfil_id, permissao_id),
+            )
+        _registrar_auditoria(
+            cursor, autor_id, "PERFIL_CRIADO", "perfil", perfil_id,
+            detalhes={"permissoes": len(permissao_ids)},
+        )
+        conn.commit()
+        return perfil_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def atualizar_perfil(perfil_id, nome, descricao, ativo, permissao_ids, autor_id):
+    exigir_gerenciamento_perfis(autor_id)
+    nome = (nome or "").strip()
+    if not nome:
+        raise ValueError("Informe o nome do perfil.")
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id, chave, sistema FROM perfis WHERE id = %s", (perfil_id,))
+        perfil = cursor.fetchone()
+        if not perfil:
+            raise ValueError("Perfil não encontrado.")
+        if perfil["chave"] == "administrador" and not usuario_eh_administrador(autor_id):
+            raise PermissionError("Somente um administrador pode alterar o perfil Administrador.")
+        cursor.execute("SELECT id FROM perfis WHERE nome = %s AND id <> %s", (nome, perfil_id))
+        if cursor.fetchone():
+            raise ValueError("Já existe um perfil com esse nome.")
+        if perfil["chave"] == "administrador":
+            ativo = True
+            cursor.execute("SELECT id FROM permissoes")
+            permissao_ids = {linha["id"] for linha in cursor.fetchall()}
+        else:
+            permissao_ids = set(permissao_ids or [])
+        _validar_dependencia_administrativa(cursor, permissao_ids)
+        cursor.execute(
+            "UPDATE perfis SET nome = %s, descricao = %s, ativo = %s WHERE id = %s",
+            (nome, (descricao or "").strip() or None, bool(ativo), perfil_id),
+        )
+        cursor.execute("DELETE FROM perfil_permissoes WHERE perfil_id = %s", (perfil_id,))
+        for permissao_id in permissao_ids:
+            cursor.execute(
+                "INSERT INTO perfil_permissoes (perfil_id, permissao_id) VALUES (%s, %s)",
+                (perfil_id, permissao_id),
+            )
+        _registrar_auditoria(
+            cursor, autor_id, "PERFIL_ATUALIZADO", "perfil", perfil_id,
+            detalhes={"ativo": bool(ativo), "permissoes": len(permissao_ids)},
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def excluir_perfil(perfil_id, autor_id):
+    exigir_gerenciamento_perfis(autor_id)
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT chave, sistema FROM perfis WHERE id = %s", (perfil_id,))
+        perfil = cursor.fetchone()
+        if not perfil:
+            raise ValueError("Perfil não encontrado.")
+        if perfil["sistema"]:
+            raise ValueError("Perfis padrão do sistema não podem ser excluídos.")
+        cursor.execute("SELECT COUNT(*) AS total FROM usuarios WHERE perfil_id = %s", (perfil_id,))
+        if cursor.fetchone()["total"]:
+            raise ValueError("Realocar os usuários vinculados antes de excluir este perfil.")
+        cursor.execute("DELETE FROM perfis WHERE id = %s", (perfil_id,))
+        _registrar_auditoria(cursor, autor_id, "PERFIL_EXCLUIDO", "perfil", perfil_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _exigir_acesso_chamado(chamado_id, usuario_id, permissao_proprio, permissao_fila):
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT usuario_id, analista_id FROM chamados WHERE id = %s", (chamado_id,))
+        chamado = cursor.fetchone()
+        if not chamado:
+            raise ValueError("Chamado não encontrado.")
+        if chamado["usuario_id"] == usuario_id:
+            if usuario_tem_permissao(usuario_id, permissao_proprio):
+                return chamado
+            exigir_permissao(usuario_id, permissao_fila)
+        elif usuario_eh_administrador(usuario_id) or chamado["analista_id"] == usuario_id:
+            exigir_permissao(usuario_id, permissao_fila)
+        else:
+            exigir_permissao(usuario_id, permissao_fila)
+        return chamado
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def criar_tabela_usuarios():
     conn = conectar()
     cursor = conn.cursor()
@@ -289,6 +767,7 @@ def criar_tabela_usuarios():
             cpf_hash CHAR(64) NULL,
             UNIQUE KEY uq_usuarios_cpf_hash (cpf_hash),
             papel VARCHAR(20) NOT NULL DEFAULT 'usuario',
+            perfil_id INT NULL,
             telefone VARCHAR(30) NULL,
             departamento VARCHAR(100) NULL,
             departamento_id INT NULL,
@@ -321,6 +800,7 @@ def migrar_tabela_usuarios():
         "sobrenome": "VARCHAR(255) NULL",
         "telefone": "VARCHAR(30) NULL",
         "cpf_hash": "CHAR(64) NULL",
+        "perfil_id": "INT NULL",
         "departamento": "VARCHAR(100) NULL",
         "departamento_id": "INT NULL",
         "cargo": "VARCHAR(100) NULL",
@@ -336,6 +816,36 @@ def migrar_tabela_usuarios():
         logger.info("Migração aplicada: índice único de CPF adicionado em usuários.")
     cursor.close()
     conn.close()
+
+
+def migrar_usuarios_rbac():
+    """Vincula contas legadas aos perfis padrão sem remover o campo papel."""
+    conn = conectar()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """UPDATE usuarios u
+               INNER JOIN perfis p ON p.chave = CASE u.papel
+                   WHEN 'admin' THEN 'administrador'
+                   WHEN 'analista' THEN 'analista'
+                   ELSE 'usuario'
+               END
+               SET u.perfil_id = p.id
+               WHERE u.perfil_id IS NULL"""
+        )
+        if not _fk_existe(cursor, "usuarios", "fk_usuarios_perfil"):
+            cursor.execute(
+                """ALTER TABLE usuarios
+                   ADD CONSTRAINT fk_usuarios_perfil
+                   FOREIGN KEY (perfil_id) REFERENCES perfis(id) ON DELETE RESTRICT"""
+            )
+        conn.commit()
+    except mysql.connector.Error as erro:
+        conn.rollback()
+        logger.warning("Não foi possível concluir a migração RBAC de usuários: %s", erro)
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def migrar_departamentos_usuarios():
@@ -522,8 +1032,8 @@ def migrar_tabela_chamados():
 def criar_tabela_base_casos_ia():
     """Cria a memória operacional usada pelo RAG.
 
-    A tabela só recebe chamados cuja resolução foi confirmada pelo solicitante e
-    autorizada pelo analista. Ela é deliberadamente separada dos chamados brutos.
+    A tabela recebe somente casos selecionados pelo analista responsável. Ela é
+    deliberadamente separada dos chamados brutos e armazena texto anonimizado.
     """
     conn = conectar()
     cursor = conn.cursor()
@@ -560,7 +1070,7 @@ def criar_tabela_base_casos_ia():
 
 
 def migrar_tabela_base_casos_ia():
-    """Evolui a base de aprendizado sem perder casos já confirmados."""
+    """Evolui a base de aprendizado sem remover casos já selecionados pelo analista."""
     conn = conectar()
     cursor = conn.cursor()
     colunas_novas = {
@@ -579,7 +1089,6 @@ def migrar_tabela_base_casos_ia():
             conn.commit()
             logger.info("Migração aplicada: coluna %s adicionada em base_casos_ia.", nome_coluna)
 
-    # Migra o valor legado antes de removê-lo; as novas colunas passam a ser a fonte única.
     if _coluna_existe(cursor, "base_casos_ia", "categoria"):
         cursor.execute("""UPDATE base_casos_ia
                           SET categoria_final = COALESCE(categoria_final, categoria),
@@ -591,20 +1100,13 @@ def migrar_tabela_base_casos_ia():
     cursor.execute("""UPDATE base_casos_ia
                       SET urgencia_final = COALESCE(urgencia_final, 'Media'),
                           equipe_final = COALESCE(equipe_final, 'Suporte')""")
-    # Casos legados não possuem autorização registrada do titular. A remoção
-    # alcança somente a cópia de aprendizagem; o chamado original é preservado.
-    cursor.execute("""DELETE b FROM base_casos_ia b
-                      LEFT JOIN chamados c ON c.id = b.chamado_id
-                      WHERE c.uso_ia_autorizado_em IS NULL""")
-    if cursor.rowcount:
-        logger.info("%d caso(s) legado(s) removido(s) da base da IA por falta de autorização do titular.", cursor.rowcount)
     conn.commit()
     cursor.close()
     conn.close()
 
 
 def listar_casos_base_ia():
-    """Retorna exclusivamente os casos confirmados que podem orientar a IA."""
+    """Retorna exclusivamente os casos selecionados para orientar a IA."""
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("""
@@ -623,6 +1125,7 @@ def listar_casos_base_ia():
 def salvar_chamado(titulo, descricao, categoria, urgencia, confiabilidade=None,
                     sla_resposta=None, sla_resolucao=None, equipe_destino=None,
                     usuario_id=None):
+    exigir_permissao(usuario_id, "chamados.abrir")
     criado_em = datetime.now()
     prazo_resposta, prazo_resolucao = calcular_prazos(criado_em, urgencia)
 
@@ -649,7 +1152,16 @@ def salvar_chamado(titulo, descricao, categoria, urgencia, confiabilidade=None,
     return novo_id
 
 
-def listar_chamados(limite=20, usuario_id=None):
+def listar_chamados(limite=20, usuario_id=None, executor_id=None, para_relatorio=False):
+    if usuario_id is not None:
+        if executor_id != usuario_id and not usuario_eh_administrador(executor_id):
+            raise PermissionError("Você não tem permissão para consultar chamados de outro usuário.")
+        exigir_permissao(executor_id, "chamados.visualizar_proprios")
+    else:
+        if para_relatorio and usuario_tem_permissao(executor_id, "relatorios.visualizar"):
+            pass
+        else:
+            exigir_permissao(executor_id, "chamados.visualizar_fila")
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     base_query = """
@@ -673,7 +1185,7 @@ def listar_chamados(limite=20, usuario_id=None):
     return resultados
 
 
-def buscar_chamado_por_id(chamado_id):
+def buscar_chamado_por_id(chamado_id, executor_id):
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
@@ -687,10 +1199,14 @@ def buscar_chamado_por_id(chamado_id):
     resultado = cursor.fetchone()
     cursor.close()
     conn.close()
+    if resultado:
+        _exigir_acesso_chamado(
+            chamado_id, executor_id, "chamados.visualizar_proprios", "chamados.visualizar_fila",
+        )
     return resultado
 
 
-def atualizar_status_chamado(chamado_id, novo_status, autor_id=None):
+def _atualizar_status_chamado(chamado_id, novo_status, autor_id=None):
     agora = datetime.now()
 
     conn = conectar()
@@ -749,10 +1265,16 @@ def atualizar_status_chamado(chamado_id, novo_status, autor_id=None):
     conn.close()
 
 
+def atualizar_status_chamado(chamado_id, novo_status, autor_id=None):
+    exigir_permissao(autor_id, "chamados.alterar_status")
+    return _atualizar_status_chamado(chamado_id, novo_status, autor_id)
+
+
 def registrar_resolucao_chamado(chamado_id, analista_id, diagnostico, solucao,
                                 compartilhar_conhecimento, categoria_final,
                                 urgencia_final, equipe_final):
     """Registra a resolução técnica antes de marcar o chamado como resolvido."""
+    exigir_permissao(analista_id, "chamados.registrar_resolucao")
     diagnostico = (diagnostico or "").strip()
     solucao = (solucao or "").strip()
     if not diagnostico or not solucao:
@@ -767,11 +1289,15 @@ def registrar_resolucao_chamado(chamado_id, analista_id, diagnostico, solucao,
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
-        "SELECT status, analista_id, categoria_ia, urgencia_ia, equipe_ia FROM chamados WHERE id = %s",
+        """SELECT c.status, c.analista_id, c.titulo, c.descricao,
+                  c.categoria_ia, c.urgencia_ia, c.equipe_ia, c.confiabilidade,
+                  u.nome, u.sobrenome, u.email, u.telefone
+           FROM chamados c LEFT JOIN usuarios u ON u.id = c.usuario_id
+           WHERE c.id = %s""",
         (chamado_id,),
     )
     chamado = cursor.fetchone()
-    if not chamado or chamado["analista_id"] != analista_id or chamado["status"] != "Em Andamento":
+    if not chamado or (chamado["analista_id"] != analista_id and not usuario_eh_administrador(analista_id)) or chamado["status"] != "Em Andamento":
         cursor.close()
         conn.close()
         raise ValueError("Somente o analista responsável pode registrar a resolução deste chamado.")
@@ -804,12 +1330,26 @@ def registrar_resolucao_chamado(chamado_id, analista_id, diagnostico, solucao,
             "classificacao_corrigida": classificacao_corrigida,
         },
     )
+    if compartilhar_conhecimento:
+        chamado.update({
+            "categoria_final": categoria_final,
+            "urgencia_final": urgencia_final,
+            "equipe_final": equipe_final,
+            "diagnostico_final": diagnostico,
+            "solucao_final": solucao,
+        })
+        _promover_caso_para_base_ia(cursor, chamado_id, chamado, agora, analista_id)
+    else:
+        cursor.execute("DELETE FROM base_casos_ia WHERE chamado_id = %s", (chamado_id,))
+        if cursor.rowcount:
+            _registrar_auditoria(cursor, analista_id, "CASO_REMOVIDO_DA_BASE_IA", "base_casos_ia", chamado_id)
     conn.commit()
     cursor.close()
     conn.close()
 
 
 def atribuir_chamado(chamado_id, analista_id):
+    exigir_permissao(analista_id, "chamados.assumir")
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
@@ -836,6 +1376,13 @@ def cancelar_chamado_sem_atribuicao(chamado_id, motivo, autor_id=None):
     if not motivo or not motivo.strip():
         raise ValueError("Informe o motivo do cancelamento.")
 
+    if not autor_id:
+        raise PermissionError("É necessário identificar o usuário que cancela o chamado.")
+    chamado = _exigir_acesso_chamado(
+        chamado_id, autor_id, "chamados.cancelar_proprios", "chamados.cancelar_fila",
+    )
+    if chamado["usuario_id"] != autor_id and not usuario_eh_administrador(autor_id):
+        exigir_permissao(autor_id, "chamados.cancelar_fila")
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
@@ -872,69 +1419,57 @@ def _anonimizar_texto_para_ia(texto, usuario):
     return texto
 
 
-def confirmar_resolucao_usuario(chamado_id, usuario_id, autoriza_uso_ia=False):
+def _promover_caso_para_base_ia(cursor, chamado_id, chamado, selecionado_em, analista_id):
+    """Registra na base de conhecimento o caso selecionado pelo analista."""
+    classificacao_corrigida = any((
+        chamado["categoria_ia"] != chamado["categoria_final"],
+        chamado["urgencia_ia"] != chamado["urgencia_final"],
+        chamado["equipe_ia"] != chamado["equipe_final"],
+    ))
+    cursor.execute(
+        """INSERT INTO base_casos_ia
+           (chamado_id, titulo, descricao_problema,
+            categoria_ia, urgencia_ia, equipe_ia, confiabilidade_ia,
+            categoria_final, urgencia_final, equipe_final, classificacao_corrigida,
+            diagnostico, solucao, analista_id, confirmado_em)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+           ON DUPLICATE KEY UPDATE titulo = VALUES(titulo),
+               descricao_problema = VALUES(descricao_problema),
+               categoria_ia = VALUES(categoria_ia), urgencia_ia = VALUES(urgencia_ia),
+               equipe_ia = VALUES(equipe_ia), confiabilidade_ia = VALUES(confiabilidade_ia),
+               categoria_final = VALUES(categoria_final), urgencia_final = VALUES(urgencia_final),
+               equipe_final = VALUES(equipe_final), classificacao_corrigida = VALUES(classificacao_corrigida),
+               diagnostico = VALUES(diagnostico), solucao = VALUES(solucao),
+               analista_id = VALUES(analista_id), confirmado_em = VALUES(confirmado_em)""",
+        (chamado_id,
+         _anonimizar_texto_para_ia(chamado["titulo"], chamado),
+         _anonimizar_texto_para_ia(chamado["descricao"], chamado),
+         chamado["categoria_ia"], chamado["urgencia_ia"], chamado["equipe_ia"], chamado["confiabilidade"],
+         chamado["categoria_final"], chamado["urgencia_final"], chamado["equipe_final"], classificacao_corrigida,
+         _anonimizar_texto_para_ia(chamado["diagnostico_final"], chamado),
+         _anonimizar_texto_para_ia(chamado["solucao_final"], chamado), analista_id, selecionado_em),
+    )
+    _registrar_auditoria(cursor, analista_id, "CASO_PROMOVIDO_PARA_IA", "base_casos_ia", chamado_id)
+
+
+def confirmar_resolucao_usuario(chamado_id, usuario_id):
+    exigir_permissao(usuario_id, "chamados.confirmar_resolucao")
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
-    agora = datetime.now()
     cursor.execute(
         """UPDATE chamados
-           SET status = 'Fechado',
-               uso_ia_autorizado_em = CASE WHEN %s THEN %s ELSE NULL END
+           SET status = 'Fechado'
            WHERE id = %s AND usuario_id = %s AND status = 'Resolvido'""",
-        (bool(autoriza_uso_ia), agora, chamado_id, usuario_id),
+        (chamado_id, usuario_id),
     )
     if cursor.rowcount == 0:
         cursor.close()
         conn.close()
         raise ValueError("A resolução não pode ser confirmada para este chamado.")
 
-    cursor.execute(
-        """SELECT c.titulo, c.descricao, c.categoria_ia, c.urgencia_ia, c.equipe_ia, c.confiabilidade,
-                  c.categoria_final, c.urgencia_final, c.equipe_final, c.diagnostico_final, c.solucao_final,
-                  c.compartilhar_conhecimento, c.analista_id, u.nome, u.sobrenome, u.email, u.telefone
-           FROM chamados c JOIN usuarios u ON u.id = c.usuario_id
-           WHERE c.id = %s""",
-        (chamado_id,),
-    )
-    chamado = cursor.fetchone()
-    if autoriza_uso_ia and chamado["compartilhar_conhecimento"] and chamado["diagnostico_final"] and chamado["solucao_final"]:
-        cursor.execute(
-            """INSERT INTO aceites_privacidade (usuario_id, politica_versao, finalidade, aceito_em)
-               VALUES (%s, %s, %s, %s)""",
-            (usuario_id, VERSAO_POLITICA_PRIVACIDADE, "uso_ia_referencia_interna", agora),
-        )
-        classificacao_corrigida = any((
-            chamado["categoria_ia"] != chamado["categoria_final"],
-            chamado["urgencia_ia"] != chamado["urgencia_final"],
-            chamado["equipe_ia"] != chamado["equipe_final"],
-        ))
-        cursor.execute(
-            """INSERT INTO base_casos_ia
-               (chamado_id, titulo, descricao_problema,
-                categoria_ia, urgencia_ia, equipe_ia, confiabilidade_ia,
-                categoria_final, urgencia_final, equipe_final, classificacao_corrigida,
-                diagnostico, solucao, analista_id, confirmado_em)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-               ON DUPLICATE KEY UPDATE titulo = VALUES(titulo),
-                   descricao_problema = VALUES(descricao_problema),
-                   categoria_ia = VALUES(categoria_ia), urgencia_ia = VALUES(urgencia_ia),
-                   equipe_ia = VALUES(equipe_ia), confiabilidade_ia = VALUES(confiabilidade_ia),
-                   categoria_final = VALUES(categoria_final), urgencia_final = VALUES(urgencia_final),
-                   equipe_final = VALUES(equipe_final), classificacao_corrigida = VALUES(classificacao_corrigida),
-                   diagnostico = VALUES(diagnostico), solucao = VALUES(solucao),
-                   analista_id = VALUES(analista_id), confirmado_em = VALUES(confirmado_em)""",
-            (chamado_id,
-             _anonimizar_texto_para_ia(chamado["titulo"], chamado),
-             _anonimizar_texto_para_ia(chamado["descricao"], chamado),
-             chamado["categoria_ia"], chamado["urgencia_ia"], chamado["equipe_ia"], chamado["confiabilidade"],
-             chamado["categoria_final"], chamado["urgencia_final"], chamado["equipe_final"], classificacao_corrigida,
-             _anonimizar_texto_para_ia(chamado["diagnostico_final"], chamado),
-             _anonimizar_texto_para_ia(chamado["solucao_final"], chamado), chamado["analista_id"], agora),
-        )
-        _registrar_auditoria(cursor, usuario_id, "CASO_PROMOVIDO_PARA_IA", "base_casos_ia", chamado_id)
     _registrar_auditoria(
         cursor, usuario_id, "RESOLUCAO_CONFIRMADA", "chamado", chamado_id,
-        detalhes={"status_anterior": "Resolvido", "status_novo": "Fechado", "uso_ia_autorizado": bool(autoriza_uso_ia)},
+        detalhes={"status_anterior": "Resolvido", "status_novo": "Fechado"},
     )
     conn.commit()
     cursor.close()
@@ -942,6 +1477,7 @@ def confirmar_resolucao_usuario(chamado_id, usuario_id, autoriza_uso_ia=False):
 
 
 def reabrir_chamado_usuario(chamado_id, usuario_id):
+    exigir_permissao(usuario_id, "chamados.confirmar_resolucao")
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
@@ -984,7 +1520,10 @@ def criar_tabela_mensagens():
     logger.debug("Tabela de mensagens verificada.")
 
 
-def listar_mensagens_chamado(chamado_id):
+def listar_mensagens_chamado(chamado_id, executor_id):
+    _exigir_acesso_chamado(
+        chamado_id, executor_id, "chamados.visualizar_proprios", "chamados.visualizar_fila",
+    )
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
@@ -1000,7 +1539,7 @@ def listar_mensagens_chamado(chamado_id):
 def enviar_mensagem_chamado(chamado_id, autor_id, autor_nome, autor_papel, mensagem):
     conn = conectar()
     cursor = conn.cursor()
-    cursor.execute("SELECT status FROM chamados WHERE id = %s", (chamado_id,))
+    cursor.execute("SELECT status, usuario_id, analista_id FROM chamados WHERE id = %s", (chamado_id,))
     chamado = cursor.fetchone()
     if not chamado:
         cursor.close()
@@ -1010,6 +1549,16 @@ def enviar_mensagem_chamado(chamado_id, autor_id, autor_nome, autor_papel, mensa
         cursor.close()
         conn.close()
         raise ValueError("Não é possível enviar mensagens para um chamado encerrado.")
+    if chamado[1] == autor_id:
+        exigir_permissao(autor_id, "chamados.responder_proprios")
+        acao_analista = False
+    elif chamado[2] == autor_id or usuario_eh_administrador(autor_id):
+        exigir_permissao(autor_id, "chamados.responder_atribuidos")
+        acao_analista = True
+    else:
+        cursor.close()
+        conn.close()
+        raise PermissionError("Você não tem permissão para responder a este chamado.")
     cursor.execute(
         """INSERT INTO mensagens_chamado (chamado_id, autor_id, autor_nome, autor_papel, mensagem)
            VALUES (%s, %s, %s, %s, %s)""",
@@ -1022,7 +1571,7 @@ def enviar_mensagem_chamado(chamado_id, autor_id, autor_nome, autor_papel, mensa
         detalhes={"mensagem_id": novo_id, "papel_autor": autor_papel},
     )
 
-    if autor_papel == "analista":
+    if acao_analista:
         cursor.execute(
             "UPDATE chamados SET primeira_resposta_em = COALESCE(primeira_resposta_em, %s) WHERE id = %s",
             (datetime.now(), chamado_id),
@@ -1032,10 +1581,10 @@ def enviar_mensagem_chamado(chamado_id, autor_id, autor_nome, autor_papel, mensa
     cursor.close()
     conn.close()
 
-    if autor_papel == "analista" and chamado[0] == "Em Andamento":
-        atualizar_status_chamado(chamado_id, "Em Espera", autor_id=autor_id)
-    if autor_papel == "usuario" and chamado[0] == "Em Espera":
-        atualizar_status_chamado(chamado_id, "Em Andamento", autor_id=autor_id)
+    if acao_analista and chamado[0] == "Em Andamento":
+        _atualizar_status_chamado(chamado_id, "Em Espera", autor_id=autor_id)
+    if not acao_analista and chamado[0] == "Em Espera":
+        _atualizar_status_chamado(chamado_id, "Em Andamento", autor_id=autor_id)
 
     return novo_id
 
@@ -1064,7 +1613,7 @@ def criar_tabela_anexos():
 def salvar_anexo_chamado(chamado_id, autor_id, nome_arquivo, tipo_arquivo, conteudo):
     conn = conectar()
     cursor = conn.cursor()
-    cursor.execute("SELECT status FROM chamados WHERE id = %s", (chamado_id,))
+    cursor.execute("SELECT status, usuario_id, analista_id FROM chamados WHERE id = %s", (chamado_id,))
     chamado = cursor.fetchone()
     if not chamado:
         cursor.close()
@@ -1074,6 +1623,14 @@ def salvar_anexo_chamado(chamado_id, autor_id, nome_arquivo, tipo_arquivo, conte
         cursor.close()
         conn.close()
         raise ValueError("Não é possível adicionar anexos a um chamado encerrado.")
+    if chamado[1] == autor_id:
+        exigir_permissao(autor_id, "chamados.anexar_proprios")
+    elif chamado[2] == autor_id or usuario_eh_administrador(autor_id):
+        exigir_permissao(autor_id, "chamados.anexar_atribuidos")
+    else:
+        cursor.close()
+        conn.close()
+        raise PermissionError("Você não tem permissão para anexar arquivos neste chamado.")
     cursor.execute(
         """INSERT INTO anexos_chamado
            (chamado_id, autor_id, nome_arquivo, tipo_arquivo, conteudo)
@@ -1089,7 +1646,10 @@ def salvar_anexo_chamado(chamado_id, autor_id, nome_arquivo, tipo_arquivo, conte
     conn.close()
 
 
-def listar_anexos_chamado(chamado_id):
+def listar_anexos_chamado(chamado_id, executor_id):
+    _exigir_acesso_chamado(
+        chamado_id, executor_id, "chamados.visualizar_proprios", "chamados.visualizar_fila",
+    )
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
@@ -1180,6 +1740,7 @@ def migrar_tabela_atendimentos_ia():
 
 
 def salvar_atendimento_ia(usuario_id):
+    exigir_permissao(usuario_id, "ia.utilizar")
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
@@ -1194,9 +1755,10 @@ def salvar_atendimento_ia(usuario_id):
     return atendimento_id
 
 
-def registrar_resultado_atendimento_ia(atendimento_id, resultado, chamado_id=None):
+def registrar_resultado_atendimento_ia(atendimento_id, resultado, chamado_id=None, usuario_id=None):
     if resultado not in {"Resolvido", "Nao resolvido"}:
         raise ValueError("Resultado de atendimento IA inválido.")
+    exigir_permissao(usuario_id, "ia.utilizar")
 
     conn = conectar()
     cursor = conn.cursor()
@@ -1219,8 +1781,9 @@ def registrar_resultado_atendimento_ia(atendimento_id, resultado, chamado_id=Non
     conn.close()
 
 
-def listar_atendimentos_ia(limite=5000):
+def listar_atendimentos_ia(limite=5000, executor_id=None):
     """Retorna dados agregáveis das orientações da IA para os relatórios administrativos."""
+    exigir_permissao(executor_id, "relatorios.visualizar")
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
@@ -1287,6 +1850,7 @@ def listar_departamentos(apenas_ativos=False):
 
 
 def criar_departamento(nome, descricao=None, autor_id=None):
+    exigir_permissao(autor_id, "departamentos.gerenciar")
     nome = (nome or "").strip()
     if not nome:
         raise ValueError("Informe o nome do departamento.")
@@ -1313,6 +1877,7 @@ def criar_departamento(nome, descricao=None, autor_id=None):
 
 
 def atualizar_departamento(departamento_id, nome, descricao, ativo, autor_id=None):
+    exigir_permissao(autor_id, "departamentos.gerenciar")
     nome = (nome or "").strip()
     if not nome:
         raise ValueError("Informe o nome do departamento.")
@@ -1345,7 +1910,10 @@ def atualizar_departamento(departamento_id, nome, descricao, ativo, autor_id=Non
 
 
 def criar_usuario(nome, email, senha_hash, papel, sobrenome=None, telefone=None,
-                  cpf=None, departamento=None, departamento_id=None, cargo=None, autor_id=None):
+                  cpf=None, departamento=None, departamento_id=None, cargo=None, autor_id=None,
+                  perfil_id=None):
+    if autor_id is not None:
+        exigir_permissao(autor_id, "usuarios.gerenciar")
     cpf_hash = None
     if cpf:
         cpf_normalizado = normalizar_cpf(cpf)
@@ -1354,11 +1922,17 @@ def criar_usuario(nome, email, senha_hash, papel, sobrenome=None, telefone=None,
         cpf_hash = _hash_cpf(cpf_normalizado)
     conn = conectar()
     cursor = conn.cursor()
+    perfil_id = perfil_id if perfil_id is not None else _perfil_padrao_id(cursor, papel)
+    papel = _papel_compativel_perfil(cursor, perfil_id)
+    if autor_id is not None and papel == "admin" and not usuario_eh_administrador(autor_id):
+        cursor.close()
+        conn.close()
+        raise PermissionError("Somente um administrador pode atribuir o perfil Administrador.")
     cursor.execute(
         """INSERT INTO usuarios
-           (nome, sobrenome, email, senha_hash, papel, telefone, cpf_hash, departamento, departamento_id, cargo)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-        (nome, sobrenome, email, senha_hash, papel, telefone, cpf_hash, departamento, departamento_id, cargo),
+           (nome, sobrenome, email, senha_hash, papel, perfil_id, telefone, cpf_hash, departamento, departamento_id, cargo)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+        (nome, sobrenome, email, senha_hash, papel, perfil_id, telefone, cpf_hash, departamento, departamento_id, cargo),
     )
     novo_id = cursor.lastrowid
     _registrar_auditoria(
@@ -1381,14 +1955,18 @@ def buscar_usuario_por_email(email):
     return resultado
 
 
-def listar_usuarios():
+def listar_usuarios(executor_id=None, para_relatorio=False):
+    if not (para_relatorio and usuario_tem_permissao(executor_id, "relatorios.visualizar")):
+        exigir_permissao(executor_id, "usuarios.visualizar")
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
-        """SELECT u.id, u.nome, u.sobrenome, u.email, u.papel, u.telefone,
+        """SELECT u.id, u.nome, u.sobrenome, u.email, u.papel, u.perfil_id,
+                  p.nome AS perfil_nome, p.chave AS perfil_chave, u.telefone,
                   COALESCE(d.nome, u.departamento) AS departamento, u.departamento_id, u.cargo, u.criado_em,
                   u.ultimo_login_em AS ultimo_login
            FROM usuarios u
+           LEFT JOIN perfis p ON p.id = u.perfil_id
            LEFT JOIN departamentos d ON d.id = u.departamento_id
            ORDER BY u.criado_em DESC"""
     )
@@ -1401,7 +1979,12 @@ def listar_usuarios():
 def buscar_usuario_por_id(usuario_id):
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM usuarios WHERE id = %s", (usuario_id,))
+    cursor.execute(
+        """SELECT u.*, p.nome AS perfil_nome, p.chave AS perfil_chave
+           FROM usuarios u LEFT JOIN perfis p ON p.id = u.perfil_id
+           WHERE u.id = %s""",
+        (usuario_id,),
+    )
     resultado = cursor.fetchone()
     cursor.close()
     conn.close()
@@ -1441,6 +2024,7 @@ def _buscar_varios(cursor, consulta, parametros=()):
 
 def exportar_dados_titular(usuario_id, autor_id=None):
     """Gera ZIP de acesso com dados do titular, sem expor segredos de autenticação."""
+    exigir_permissao(autor_id, "privacidade.gerenciar")
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -1550,6 +2134,7 @@ def exportar_dados_titular(usuario_id, autor_id=None):
 
 def anonimizar_titular(usuario_id, autor_id=None):
     """Anonimiza dados pessoais sem apagar métricas e eventos operacionais."""
+    exigir_permissao(autor_id, "privacidade.gerenciar")
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -1559,6 +2144,7 @@ def anonimizar_titular(usuario_id, autor_id=None):
             raise ValueError("Titular não encontrado.")
         if usuario.get("conta_anonimizada_em"):
             raise ValueError("Este titular já foi anonimizado.")
+        _proteger_ultimo_administrador(cursor, usuario_id, "anonimizar esta conta")
 
         cursor.execute("SELECT id FROM chamados WHERE usuario_id = %s", (usuario_id,))
         chamados_solicitados = [item["id"] for item in cursor.fetchall()]
@@ -1652,7 +2238,9 @@ def anonimizar_titular(usuario_id, autor_id=None):
 
 
 def atualizar_usuario(usuario_id, nome, email, papel, senha_hash=None, sobrenome=None,
-                      telefone=None, cpf=None, departamento=None, departamento_id=None, cargo=None, autor_id=None):
+                      telefone=None, cpf=None, departamento=None, departamento_id=None, cargo=None, autor_id=None,
+                      perfil_id=None):
+    exigir_permissao(autor_id, "usuarios.gerenciar")
     cpf_hash = None
     atualizar_cpf = bool(cpf)
     if atualizar_cpf:
@@ -1662,31 +2250,52 @@ def atualizar_usuario(usuario_id, nome, email, papel, senha_hash=None, sobrenome
         cpf_hash = _hash_cpf(cpf_normalizado)
     conn = conectar()
     cursor = conn.cursor()
+    perfil_id = perfil_id if perfil_id is not None else _perfil_padrao_id(cursor, papel)
+    papel = _papel_compativel_perfil(cursor, perfil_id)
+    cursor.execute("SELECT perfil_id FROM usuarios WHERE id = %s", (usuario_id,))
+    conta_atual = cursor.fetchone()
+    if not conta_atual:
+        cursor.close()
+        conn.close()
+        raise ValueError("Usuário não encontrado.")
+    papel_atual = _papel_compativel_perfil(cursor, conta_atual[0])
+    if autor_id is not None and (papel == "admin" or papel_atual == "admin") and not usuario_eh_administrador(autor_id):
+        cursor.close()
+        conn.close()
+        raise PermissionError("Somente um administrador pode alterar uma conta administrativa.")
+    if papel_atual == "admin" and papel != "admin":
+        try:
+            _proteger_ultimo_administrador(cursor, usuario_id, "remover o perfil Administrador desta conta")
+        except Exception:
+            conn.rollback()
+            cursor.close()
+            conn.close()
+            raise
     if senha_hash:
         if atualizar_cpf:
             cursor.execute(
                 """UPDATE usuarios SET nome = %s, sobrenome = %s, email = %s, papel = %s,
-                   telefone = %s, cpf_hash = %s, departamento = %s, departamento_id = %s, cargo = %s, senha_hash = %s WHERE id = %s""",
-                (nome, sobrenome, email, papel, telefone, cpf_hash, departamento, departamento_id, cargo, senha_hash, usuario_id),
+                   perfil_id = %s, telefone = %s, cpf_hash = %s, departamento = %s, departamento_id = %s, cargo = %s, senha_hash = %s WHERE id = %s""",
+                (nome, sobrenome, email, papel, perfil_id, telefone, cpf_hash, departamento, departamento_id, cargo, senha_hash, usuario_id),
             )
         else:
             cursor.execute(
                 """UPDATE usuarios SET nome = %s, sobrenome = %s, email = %s, papel = %s,
-                   telefone = %s, departamento = %s, departamento_id = %s, cargo = %s, senha_hash = %s WHERE id = %s""",
-                (nome, sobrenome, email, papel, telefone, departamento, departamento_id, cargo, senha_hash, usuario_id),
+                   perfil_id = %s, telefone = %s, departamento = %s, departamento_id = %s, cargo = %s, senha_hash = %s WHERE id = %s""",
+                (nome, sobrenome, email, papel, perfil_id, telefone, departamento, departamento_id, cargo, senha_hash, usuario_id),
             )
     else:
         if atualizar_cpf:
             cursor.execute(
                 """UPDATE usuarios SET nome = %s, sobrenome = %s, email = %s, papel = %s,
-                   telefone = %s, cpf_hash = %s, departamento = %s, departamento_id = %s, cargo = %s WHERE id = %s""",
-                (nome, sobrenome, email, papel, telefone, cpf_hash, departamento, departamento_id, cargo, usuario_id),
+                   perfil_id = %s, telefone = %s, cpf_hash = %s, departamento = %s, departamento_id = %s, cargo = %s WHERE id = %s""",
+                (nome, sobrenome, email, papel, perfil_id, telefone, cpf_hash, departamento, departamento_id, cargo, usuario_id),
             )
         else:
             cursor.execute(
                 """UPDATE usuarios SET nome = %s, sobrenome = %s, email = %s, papel = %s,
-                   telefone = %s, departamento = %s, departamento_id = %s, cargo = %s WHERE id = %s""",
-                (nome, sobrenome, email, papel, telefone, departamento, departamento_id, cargo, usuario_id),
+                   perfil_id = %s, telefone = %s, departamento = %s, departamento_id = %s, cargo = %s WHERE id = %s""",
+                (nome, sobrenome, email, papel, perfil_id, telefone, departamento, departamento_id, cargo, usuario_id),
             )
     linhas_afetadas = cursor.rowcount
     if linhas_afetadas:
@@ -1701,16 +2310,23 @@ def atualizar_usuario(usuario_id, nome, email, papel, senha_hash=None, sobrenome
 
 
 def excluir_usuario(usuario_id, autor_id=None):
+    exigir_permissao(autor_id, "usuarios.gerenciar")
     conn = conectar()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM usuarios WHERE id = %s", (usuario_id,))
-    linhas_afetadas = cursor.rowcount
-    if linhas_afetadas:
-        _registrar_auditoria(cursor, autor_id, "USUARIO_EXCLUIDO", "usuario", usuario_id)
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return linhas_afetadas
+    try:
+        _proteger_ultimo_administrador(cursor, usuario_id, "excluir esta conta")
+        cursor.execute("DELETE FROM usuarios WHERE id = %s", (usuario_id,))
+        linhas_afetadas = cursor.rowcount
+        if linhas_afetadas:
+            _registrar_auditoria(cursor, autor_id, "USUARIO_EXCLUIDO", "usuario", usuario_id)
+        conn.commit()
+        return linhas_afetadas
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def atualizar_senha(usuario_id, novo_hash_senha, autor_id=None):
@@ -1795,8 +2411,10 @@ def verificar_codigo(usuario_id, codigo, tipo):
 
 if __name__ == "__main__":
     configurar_logging()
+    criar_tabelas_rbac()
     criar_tabela_usuarios()
     migrar_tabela_usuarios()
+    migrar_usuarios_rbac()
     criar_tabela_chamados()
     migrar_tabela_chamados()
     criar_tabela_base_casos_ia()

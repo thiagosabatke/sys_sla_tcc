@@ -1,6 +1,7 @@
 from ia_engine import classificar_chamado
 from database import (
-    salvar_chamado, criar_tabela_departamentos, criar_tabela_usuarios, migrar_tabela_usuarios,
+    salvar_chamado, criar_tabela_departamentos, criar_tabelas_rbac, criar_tabela_usuarios,
+    migrar_tabela_usuarios, migrar_usuarios_rbac,
     migrar_departamentos_usuarios, criar_tabela_chamados, criar_tabela_auditoria,
 )
 from observability import configurar_logging
@@ -39,8 +40,10 @@ def abrir_chamado(titulo, descricao):
 if __name__ == "__main__":
     configurar_logging()
     criar_tabela_departamentos()
+    criar_tabelas_rbac()
     criar_tabela_usuarios()
     migrar_tabela_usuarios()
+    migrar_usuarios_rbac()
     migrar_departamentos_usuarios()
     criar_tabela_chamados()
     criar_tabela_auditoria()

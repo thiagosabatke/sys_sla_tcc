@@ -1,7 +1,10 @@
 import logging
 import os
 
-from database import criar_tabela_usuarios, criar_usuario, buscar_usuario_por_email, criar_tabela_auditoria
+from database import (
+    criar_tabelas_rbac, criar_tabela_usuarios, migrar_tabela_usuarios, migrar_usuarios_rbac,
+    criar_usuario, buscar_usuario_por_email, criar_tabela_auditoria,
+)
 from auth import gerar_hash_senha
 from observability import configurar_logging
 
@@ -14,7 +17,10 @@ if __name__ == "__main__":
     senha = os.getenv("SEED_ADMIN_SENHA")
     if not all((nome, email, senha)):
         raise SystemExit("Defina SEED_ADMIN_NOME, SEED_ADMIN_EMAIL e SEED_ADMIN_SENHA para criar uma conta inicial.")
+    criar_tabelas_rbac()
     criar_tabela_usuarios()
+    migrar_tabela_usuarios()
+    migrar_usuarios_rbac()
     criar_tabela_auditoria()
     if buscar_usuario_por_email(email):
         logger.info("Conta inicial já existe; ignorada.")

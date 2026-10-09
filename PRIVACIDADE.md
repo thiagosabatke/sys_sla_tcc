@@ -1,6 +1,6 @@
 # Aviso de Privacidade — Sistema Inteligente de Chamados
 
-**Versão 1.1.0 — publicada em 07/10/2026**
+**Versão 1.2.0 — publicada em 07/10/2026**
 
 Este aviso explica como os dados pessoais são tratados no Sistema Inteligente de
 Chamados, em conformidade com a Lei nº 13.709, de 14 de agosto de 2018 — Lei Geral
@@ -61,9 +61,10 @@ ocorrer somente quando necessário para as finalidades informadas, sob instruç�
 controlador e com medidas de segurança apropriadas.
 
 O sistema pode utilizar recursos de inteligência artificial para apoiar a orientação,
-classificação e o atendimento de chamados. O uso de casos como referência interna pela
-IA depende da autorização específica apresentada no encerramento do chamado e deve
-ocorrer sem identificadores diretos.
+classificação e o atendimento de chamados. A inclusão de um caso na base interna de
+conhecimento é uma decisão do analista responsável, conforme as permissões concedidas
+pela organização, e ocorre apenas após a remoção de identificadores diretos. O
+controlador deve manter documentada a base legal aplicável a esse tratamento.
 
 ## Retenção e segurança
 

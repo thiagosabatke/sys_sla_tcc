@@ -2,6 +2,7 @@ import re
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
+import mysql.connector
 from datetime import datetime
 from pathlib import Path
 
@@ -11,8 +12,12 @@ from ia_engine import (
 from rag import listar_artigos
 import sla
 from database import (
-    salvar_chamado, criar_tabela_departamentos, criar_tabela_usuarios, migrar_tabela_usuarios,
+    salvar_chamado, criar_tabela_departamentos, criar_tabelas_rbac, criar_tabela_usuarios,
+    migrar_tabela_usuarios, migrar_usuarios_rbac,
     migrar_departamentos_usuarios, listar_departamentos, criar_departamento, atualizar_departamento,
+    listar_perfis, listar_perfis_para_atribuicao, listar_permissoes, permissoes_do_perfil,
+    criar_perfil, atualizar_perfil, excluir_perfil,
+    usuario_tem_permissao, usuario_eh_administrador,
     criar_tabela_chamados, migrar_tabela_chamados, criar_tabela_mensagens,
     criar_tabela_base_casos_ia, migrar_tabela_base_casos_ia,
     criar_tabela_codigos, listar_chamados, buscar_chamado_por_id,
@@ -44,8 +49,10 @@ from auth import (
 from email_utils import enviar_email
 
 criar_tabela_departamentos()
+criar_tabelas_rbac()
 criar_tabela_usuarios()
 migrar_tabela_usuarios()
+migrar_usuarios_rbac()
 migrar_departamentos_usuarios()
 criar_tabela_chamados()
 migrar_tabela_chamados()
@@ -321,7 +328,7 @@ def tela_login():
                 elif usuario.get("senha_deve_ser_redefinida"):
                     registrar_auditoria(usuario["id"], "LOGIN_BLOQUEADO_CREDENCIAL_INVALIDADA", "sessao", resultado="FALHA")
                     st.warning("Esta credencial foi invalidada. Use “Esqueci minha senha” para definir uma nova senha.")
-                elif usuario["papel"] == "admin":
+                elif usuario_eh_administrador(usuario["id"]):
                     st.session_state.usuario_pendente_2fa = usuario
                     if not usuario.get("totp_secret"):
                         codigo = gerar_codigo_numerico()
@@ -472,7 +479,7 @@ def sair():
 
 
 def painel_conversa_chamado(chamado, usuario_atual, papel_atual, key_prefix):
-    mensagens = listar_mensagens_chamado(chamado["id"])
+    mensagens = listar_mensagens_chamado(chamado["id"], usuario_atual["id"])
 
     caixa = st.container(height=320, border=True)
     with caixa:
@@ -502,7 +509,7 @@ def painel_conversa_chamado(chamado, usuario_atual, papel_atual, key_prefix):
 
 
 def painel_anexos_chamado(chamado, usuario, key_prefix):
-    anexos = listar_anexos_chamado(chamado["id"])
+    anexos = listar_anexos_chamado(chamado["id"], usuario["id"])
     if anexos:
         st.markdown("##### Anexos")
         for anexo in anexos:
@@ -712,7 +719,7 @@ def _aba_abrir_chamado(usuario):
                     abrir_chamado = st.button("Não resolveu — abrir chamado", use_container_width=True)
 
                 if resolvido:
-                    registrar_resultado_atendimento_ia(resultado["atendimento_ia_id"], "Resolvido")
+                    registrar_resultado_atendimento_ia(resultado["atendimento_ia_id"], "Resolvido", usuario_id=usuario["id"])
                     st.session_state.chat_mensagens.append({
                         "role": "assistant",
                         "content": "Ótimo! Fico feliz que o problema tenha sido resolvido."
@@ -720,7 +727,7 @@ def _aba_abrir_chamado(usuario):
                     st.session_state.chat_resultado_final = {"status": "resolvido_pelo_usuario"}
                     st.rerun()
                 if abrir_chamado:
-                    registrar_resultado_atendimento_ia(resultado["atendimento_ia_id"], "Nao resolvido")
+                    registrar_resultado_atendimento_ia(resultado["atendimento_ia_id"], "Nao resolvido", usuario_id=usuario["id"])
                     st.session_state.chat_resultado_final = {
                         "status": "aguardando_confirmacao",
                         "atendimento_ia_id": resultado["atendimento_ia_id"],
@@ -759,7 +766,7 @@ def _aba_abrir_chamado(usuario):
                             )
                             if resultado.get("atendimento_ia_id"):
                                 registrar_resultado_atendimento_ia(
-                                    resultado["atendimento_ia_id"], "Nao resolvido", chamado_id,
+                                    resultado["atendimento_ia_id"], "Nao resolvido", chamado_id, usuario["id"],
                                 )
                         st.session_state.chat_resultado_final = {
                             "status": "registrado", "id": chamado_id, **classificacao,
@@ -799,7 +806,7 @@ def _aba_abrir_chamado(usuario):
 
 
 def _aba_meus_chamados(usuario, grupo):
-    chamados = listar_chamados(limite=50, usuario_id=usuario["id"])
+    chamados = listar_chamados(limite=50, usuario_id=usuario["id"], executor_id=usuario["id"])
 
     if grupo == "ativos":
         chamados = [c for c in chamados if c["status"] not in STATUS_ENCERRADOS]
@@ -843,7 +850,7 @@ def _aba_meus_chamados(usuario, grupo):
             st.info("Selecione um chamado na lista ao lado.")
             return
 
-        chamado = buscar_chamado_por_id(chamado_id_sel)
+        chamado = buscar_chamado_por_id(chamado_id_sel, usuario["id"])
         if not chamado or chamado["usuario_id"] != usuario["id"]:
             st.warning("Chamado não encontrado.")
             return
@@ -905,17 +912,10 @@ def _aba_meus_chamados(usuario, grupo):
                 st.write(f"**Diagnóstico:** {chamado['diagnostico_final']}")
                 st.write(f"**Solução:** {chamado.get('solucao_final') or 'Não informada'}")
             with st.form(f"form_confirmar_resolucao_{chamado['id']}"):
-                autoriza_uso_ia = st.checkbox(
-                    "Autorizo que uma versão sem identificadores diretos deste caso seja usada como referência interna pela IA para atender casos semelhantes.",
-                    value=False,
-                    help="A autorização é opcional e não afeta o fechamento do chamado.",
-                )
                 confirmar_solucao = st.form_submit_button("Confirmar solução", type="primary")
             if confirmar_solucao:
                 try:
-                    confirmar_resolucao_usuario(
-                        chamado["id"], usuario["id"], autoriza_uso_ia=autoriza_uso_ia,
-                    )
+                    confirmar_resolucao_usuario(chamado["id"], usuario["id"])
                     st.success("Solução confirmada. Chamado fechado.")
                 except ValueError as erro:
                     st.error(str(erro))
@@ -935,7 +935,7 @@ def tela_analista(usuario):
     injetar_css()
     cabecalho("Central de Serviços — Analista", f"{usuario['nome']} · Gestão de Incidentes")
 
-    chamados = listar_chamados(limite=200)
+    chamados = listar_chamados(limite=200, executor_id=usuario["id"])
     if not chamados:
         st.info("Nenhum chamado registrado ainda.")
         return
@@ -1020,7 +1020,7 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
             st.info("Selecione um chamado na fila para atender.")
             return
 
-        chamado = buscar_chamado_por_id(chamado_id_sel)
+        chamado = buscar_chamado_por_id(chamado_id_sel, usuario["id"])
         if not chamado:
             st.warning("Chamado não encontrado.")
             st.session_state.chamado_selecionado_analista = None
@@ -1101,9 +1101,9 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
                         placeholder="Ex.: Senha redefinida e Outlook reconfigurado.",
                     )
                     compartilhar = st.checkbox(
-                        "Autorizar este caso confirmado como referência para a IA",
+                        "Incluir este caso na base de conhecimento da IA",
                         value=True,
-                        help="O caso só será usado após a confirmação do solicitante.",
+                        help="A decisão é exclusiva do analista responsável. O conteúdo é anonimizado antes do uso pela IA.",
                     )
                     marcar_resolvido = st.form_submit_button("Registrar resolução", type="primary", use_container_width=True)
                 if marcar_resolvido:
@@ -1112,7 +1112,7 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
                             chamado["id"], usuario["id"], diagnostico, solucao, compartilhar,
                             categoria_final, urgencia_final, equipe_final,
                         )
-                        st.success("Aguardando a confirmação do solicitante.")
+                        st.success("Resolução registrada. O solicitante poderá confirmar ou solicitar reabertura.")
                     except ValueError as erro:
                         st.error(str(erro))
                     st.rerun()
@@ -1222,7 +1222,7 @@ def _aba_historico_analista(usuario, chamados_todos):
             st.info("Selecione um chamado fechado para ver o registro completo.")
             return
 
-        chamado = buscar_chamado_por_id(chamado_id_sel)
+        chamado = buscar_chamado_por_id(chamado_id_sel, usuario["id"])
         if not chamado or chamado["status"] != "Fechado":
             st.warning("Chamado não encontrado no histórico.")
             st.session_state.chamado_selecionado_historico = None
@@ -1292,7 +1292,7 @@ def _aba_cancelados_analista(usuario, chamados_todos):
             st.info("Selecione um chamado cancelado para consultar o registro.")
             return
 
-        chamado = buscar_chamado_por_id(chamado_id_sel)
+        chamado = buscar_chamado_por_id(chamado_id_sel, usuario["id"])
         if not chamado or chamado["status"] != "Cancelado":
             st.info("Selecione um chamado desta lista.")
             return
@@ -1336,23 +1336,20 @@ def _exibir_grafico_barras(dados, titulo, eixo_x, eixo_y, cor="#2563eb"):
 
 def relatorio_usuarios(usuarios):
     st.markdown("### Relatório de usuários")
-    st.caption("Distribuição das contas cadastradas por função de acesso.")
+    st.caption("Distribuição das contas cadastradas por perfil de acesso.")
     dados = pd.DataFrame(usuarios)
-    funcoes = ["usuario", "analista", "admin"]
     distribuicao = (
-        dados["papel"].value_counts().reindex(funcoes, fill_value=0)
-        .rename_axis("Função").reset_index(name="Quantidade")
-    ) if not dados.empty else pd.DataFrame({"Função": funcoes, "Quantidade": [0, 0, 0]})
+        dados["perfil_nome"].fillna("Sem perfil").value_counts()
+        .rename_axis("Perfil").reset_index(name="Quantidade")
+    ) if not dados.empty else pd.DataFrame({"Perfil": [], "Quantidade": []})
 
-    metricas = st.columns(4)
+    metricas = st.columns(2)
     metricas[0].metric("Total de contas", int(distribuicao["Quantidade"].sum()))
-    for coluna, funcao in zip(metricas[1:], funcoes):
-        quantidade = int(distribuicao.loc[distribuicao["Função"] == funcao, "Quantidade"].iloc[0])
-        coluna.metric(funcao.capitalize() + "s", quantidade)
+    metricas[1].metric("Perfis em uso", int(len(distribuicao)))
 
     grafico, tabela = st.columns([1.4, 1])
     with grafico:
-        _exibir_grafico_barras(distribuicao, "Contas por função", "Função", "Quantidade", "#0f766e")
+        _exibir_grafico_barras(distribuicao, "Contas por perfil", "Perfil", "Quantidade", "#0f766e")
     with tabela:
         st.dataframe(distribuicao, use_container_width=True, hide_index=True)
 
@@ -1441,17 +1438,17 @@ def relatorio_ia(chamados):
 
 
 def relatorio_aprendizado_por_casos():
-    """Mostra a memória validada que está disponível ao RAG em novas consultas."""
+    """Mostra a memória selecionada que está disponível ao RAG em novas consultas."""
     st.markdown("### Aprendizado por casos validados")
     st.caption(
         "Estes são os únicos casos operacionais disponíveis para a IA consultar. "
-        "Cada um teve diagnóstico e solução registrados pelo analista e confirmação do solicitante."
+        "Cada um foi selecionado pelo analista após o registro de diagnóstico e solução."
     )
     casos = listar_casos_base_ia()
     if not casos:
         st.info(
-            "Ainda não há casos ensinando a IA. Para incluir um, o analista deve autorizar "
-            "o uso como referência e o solicitante deve confirmar a solução."
+            "Ainda não há casos ensinando a IA. Para incluir um, o analista deve selecionar "
+            "o uso como referência ao registrar a resolução."
         )
         return
 
@@ -1459,12 +1456,12 @@ def relatorio_aprendizado_por_casos():
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Casos disponíveis à IA", len(dados))
     c2.metric("Categorias com experiência", int(dados["categoria_final"].fillna("Outros").nunique()))
-    c3.metric("Última confirmação", pd.to_datetime(dados["confirmado_em"]).max().strftime("%d/%m/%Y %H:%M"))
+    c3.metric("Última seleção", pd.to_datetime(dados["confirmado_em"]).max().strftime("%d/%m/%Y %H:%M"))
     c4.metric("Classificações corrigidas", int(dados["classificacao_corrigida"].fillna(False).astype(bool).sum()))
 
     exibicao = dados[["chamado_id", "titulo", "categoria_ia", "categoria_final", "urgencia_ia", "urgencia_final", "equipe_ia", "equipe_final", "diagnostico", "solucao", "confirmado_em"]].copy()
-    exibicao.columns = ["Chamado", "Título", "Categoria IA", "Categoria final", "Urgência IA", "Urgência final", "Equipe IA", "Equipe final", "Diagnóstico", "Solução", "Confirmado em"]
-    exibicao["Confirmado em"] = pd.to_datetime(exibicao["Confirmado em"]).dt.strftime("%d/%m/%Y %H:%M")
+    exibicao.columns = ["Chamado", "Título", "Categoria IA", "Categoria final", "Urgência IA", "Urgência final", "Equipe IA", "Equipe final", "Diagnóstico", "Solução", "Selecionado em"]
+    exibicao["Selecionado em"] = pd.to_datetime(exibicao["Selecionado em"]).dt.strftime("%d/%m/%Y %H:%M")
     st.dataframe(exibicao, use_container_width=True, hide_index=True)
 
 
@@ -1697,22 +1694,182 @@ def painel_departamentos_admin(admin):
             st.error(str(erro))
 
 
+def painel_perfis_admin(admin):
+    st.markdown("### Perfis e permissões")
+    st.caption("Perfis definem o que cada pessoa pode acessar. Alterações refletem imediatamente nas contas vinculadas.")
+    try:
+        permissoes = listar_permissoes(admin["id"])
+        perfis = listar_perfis(admin["id"])
+    except PermissionError as erro:
+        st.error(str(erro))
+        return
+
+    categorias = (
+        ("Administração", {
+            "administracao.acessar", "usuarios.visualizar", "usuarios.gerenciar",
+            "departamentos.gerenciar", "privacidade.gerenciar", "relatorios.visualizar",
+            "perfis.gerenciar",
+        }),
+        ("Abrir e acompanhar chamados", {
+            "conhecimento.visualizar", "ia.utilizar", "chamados.visualizar_proprios",
+            "chamados.abrir", "chamados.responder_proprios", "chamados.anexar_proprios",
+            "chamados.cancelar_proprios", "chamados.confirmar_resolucao",
+        }),
+        ("Atender chamados", {
+            "chamados.visualizar_fila", "chamados.assumir", "chamados.responder_atribuidos",
+            "chamados.anexar_atribuidos", "chamados.alterar_status",
+            "chamados.registrar_resolucao", "chamados.cancelar_fila",
+        }),
+    )
+    permissoes_base = {
+        "Administração": "administracao.acessar",
+        "Abrir e acompanhar chamados": "chamados.visualizar_proprios",
+        "Atender chamados": "chamados.visualizar_fila",
+    }
+
+    def renderizar_permissoes(chave, selecionadas=(), bloqueadas=False):
+        selecionadas = set(selecionadas)
+        permissao_ids = []
+        por_codigo = {permissao["codigo"]: permissao for permissao in permissoes}
+        for categoria, codigos in categorias:
+            itens = [por_codigo[codigo] for codigo in codigos if codigo in por_codigo]
+            if not itens:
+                continue
+            permissao_base = permissoes_base[categoria]
+            acesso_grupo = permissao_base in selecionadas
+            st.markdown(f"##### {categoria}")
+            for permissao in sorted(
+                itens,
+                key=lambda item: (item["codigo"] != permissao_base, item["nome"]),
+            ):
+                eh_permissao_base = permissao["codigo"] == permissao_base
+                depende_acesso_grupo = not eh_permissao_base
+                marcada = bloqueadas or permissao["id"] in selecionadas
+                marcada = st.checkbox(
+                    permissao["nome"], value=marcada, help=permissao["descricao"],
+                    disabled=bloqueadas or (depende_acesso_grupo and not acesso_grupo),
+                    key=f"{chave}_{permissao['id']}",
+                )
+                if eh_permissao_base:
+                    acesso_grupo = marcada
+                    if not acesso_grupo:
+                        for item in itens:
+                            if item["codigo"] != permissao_base:
+                                st.session_state[f"{chave}_{item['id']}"] = False
+                if marcada:
+                    permissao_ids.append(permissao["id"])
+        return permissao_ids
+
+    with st.expander("Cadastrar perfil", expanded=False):
+        nome = st.text_input("Nome do perfil", placeholder="Ex.: Suporte N1", key="novo_perfil_nome")
+        descricao = st.text_input("Descrição (opcional)", key="novo_perfil_descricao")
+        st.caption("Marque a primeira permissão de cada grupo para liberar suas ações adicionais.")
+        permissao_ids = renderizar_permissoes("novo_perfil")
+        cadastrar = st.button("Cadastrar perfil", type="primary", key="novo_perfil_cadastrar")
+        if cadastrar:
+            try:
+                criar_perfil(nome, descricao, permissao_ids, admin["id"])
+                for permissao in permissoes:
+                    st.session_state.pop(f"novo_perfil_{permissao['id']}", None)
+                st.session_state.pop("novo_perfil_nome", None)
+                st.session_state.pop("novo_perfil_descricao", None)
+                st.success("Perfil cadastrado.")
+                st.rerun()
+            except (ValueError, PermissionError, mysql.connector.Error) as erro:
+                st.error(str(erro))
+
+    tabela = pd.DataFrame(perfis)[["nome", "descricao", "ativo", "total_usuarios", "total_permissoes"]].copy()
+    tabela.columns = ["Perfil", "Descrição", "Ativo", "Usuários vinculados", "Permissões"]
+    tabela["Ativo"] = tabela["Ativo"].map({True: "Sim", False: "Não"})
+    st.dataframe(tabela, use_container_width=True, hide_index=True)
+
+    perfis_por_id = {perfil["id"]: perfil for perfil in perfis}
+    perfil_id = st.selectbox(
+        "Editar perfil",
+        options=list(perfis_por_id),
+        format_func=lambda item: perfis_por_id[item]["nome"],
+    )
+    perfil = perfis_por_id[perfil_id]
+    ids_selecionados = permissoes_do_perfil(perfil_id, admin["id"])
+    administrador_protegido = perfil["chave"] == "administrador"
+    pode_alterar_administrador = usuario_eh_administrador(admin["id"])
+
+    nome = st.text_input(
+        "Nome", value=perfil["nome"], key=f"perfil_{perfil_id}_nome",
+        disabled=administrador_protegido and not pode_alterar_administrador,
+    )
+    descricao = st.text_input(
+        "Descrição", value=perfil.get("descricao") or "", key=f"perfil_{perfil_id}_descricao",
+        disabled=administrador_protegido and not pode_alterar_administrador,
+    )
+    ativo = st.checkbox(
+        "Perfil ativo", value=bool(perfil["ativo"]), key=f"perfil_{perfil_id}_ativo",
+        disabled=administrador_protegido,
+    )
+    if administrador_protegido:
+        st.info("O perfil Administrador é protegido e sempre mantém todas as permissões.")
+    st.caption("Marque a primeira permissão de cada grupo para liberar suas ações adicionais.")
+    permissao_ids = renderizar_permissoes(
+        f"perfil_{perfil_id}", ids_selecionados, bloqueadas=administrador_protegido,
+    )
+    salvar = st.button(
+        "Salvar perfil", type="primary", key=f"perfil_{perfil_id}_salvar",
+        disabled=administrador_protegido and not pode_alterar_administrador,
+    )
+    confirmar_exclusao = st.checkbox(
+        "Confirmo a exclusão deste perfil sem usuários vinculados.", key=f"perfil_{perfil_id}_confirmar_exclusao",
+        disabled=bool(perfil["sistema"]),
+    )
+    excluir = st.button(
+        "Excluir perfil", key=f"perfil_{perfil_id}_excluir",
+        disabled=bool(perfil["sistema"]) or not confirmar_exclusao,
+    )
+
+    if salvar:
+        try:
+            atualizar_perfil(perfil_id, nome, descricao, ativo, permissao_ids, admin["id"])
+            st.success("Perfil atualizado.")
+            st.rerun()
+        except (ValueError, PermissionError, mysql.connector.Error) as erro:
+            st.error(str(erro))
+    if excluir:
+        try:
+            excluir_perfil(perfil_id, admin["id"])
+            st.success("Perfil excluído.")
+            st.rerun()
+        except (ValueError, PermissionError, mysql.connector.Error) as erro:
+            st.error(str(erro))
+
+
 def painel_perfil_usuario_admin(admin):
     usuario_id = st.session_state.get("usuario_admin_aberto")
     conta = buscar_usuario_por_id(usuario_id) if usuario_id else None
     if not conta:
         st.info("Abra um usuário pela lista para consultar ou editar o perfil.")
         return
+    if conta.get("perfil_chave") == "administrador" and not usuario_eh_administrador(admin["id"]):
+        st.error("Somente um administrador pode alterar uma conta administrativa.")
+        return
 
     st.markdown(f"#### Perfil de {conta['nome']} {conta.get('sobrenome') or ''}".strip())
     m1, m2, m3 = st.columns(3)
-    m1.metric("Perfil", conta["papel"].capitalize())
+    m1.metric("Perfil", conta.get("perfil_nome") or "Não informado")
     m2.metric("Departamento", conta.get("departamento") or "Não informado")
     m3.metric("Último login", conta["ultimo_login_em"].strftime("%d/%m/%Y %H:%M") if conta.get("ultimo_login_em") else "Nunca acessou")
 
     with st.container(border=True):
         st.caption("Dados de identificação e vínculo organizacional. Campos adicionais são opcionais.")
         departamentos = listar_departamentos()
+        perfis = listar_perfis_para_atribuicao(admin["id"], incluir_inativos=True)
+        perfis_por_id = {perfil["id"]: perfil for perfil in perfis}
+        perfil_atual_id = conta.get("perfil_id")
+        opcoes_perfil = [
+            perfil["id"] for perfil in perfis
+            if perfil["ativo"] or perfil["id"] == perfil_atual_id
+        ]
+        if not opcoes_perfil:
+            st.error("Não há perfis ativos disponíveis para atribuição.")
+            return
         departamentos_por_id = {departamento["id"]: departamento for departamento in departamentos}
         departamento_atual_id = conta.get("departamento_id")
         opcoes_departamento = [None] + [
@@ -1734,9 +1891,11 @@ def painel_perfil_usuario_admin(admin):
                 if conta.get("cpf_hash"):
                     st.caption("CPF cadastrado com proteção para busca exata.")
             with col2:
-                novo_papel = st.selectbox(
-                    "Perfil de acesso", ["usuario", "analista", "admin"],
-                    index=["usuario", "analista", "admin"].index(conta["papel"]),
+                novo_perfil_id = st.selectbox(
+                    "Perfil de acesso",
+                    options=opcoes_perfil,
+                    index=opcoes_perfil.index(perfil_atual_id) if perfil_atual_id in opcoes_perfil else 0,
+                    format_func=lambda item: perfis_por_id[item]["nome"],
                 )
                 novo_departamento_id = st.selectbox(
                     "Departamento",
@@ -1773,11 +1932,11 @@ def painel_perfil_usuario_admin(admin):
                         departamentos_por_id[novo_departamento_id]["nome"] if novo_departamento_id else None
                     )
                     atualizar_usuario(
-                        conta["id"], novo_nome, novo_email, novo_papel,
+                        conta["id"], novo_nome, novo_email, conta["papel"],
                         senha_hash=gerar_hash_senha(nova_senha) if nova_senha else None,
                         sobrenome=novo_sobrenome, telefone=novo_telefone, cpf=novo_cpf or None,
                         departamento=novo_departamento, departamento_id=novo_departamento_id, cargo=novo_cargo,
-                        autor_id=admin["id"],
+                        autor_id=admin["id"], perfil_id=novo_perfil_id,
                     )
                     st.success("Perfil atualizado.")
                     st.rerun()
@@ -1800,21 +1959,39 @@ def painel_perfil_usuario_admin(admin):
 def tela_admin(usuario):
     injetar_css()
     cabecalho("Painel Administrativo", "Acesso restrito — gerenciamento de usuários do sistema")
+    if not usuario_tem_permissao(usuario["id"], "administracao.acessar"):
+        st.error("Você não tem permissão para acessar a área administrativa.")
+        return
 
-    usuarios = listar_usuarios()
+    pode_visualizar_usuarios = usuario_tem_permissao(usuario["id"], "usuarios.visualizar")
+    pode_gerenciar_usuarios = usuario_tem_permissao(usuario["id"], "usuarios.gerenciar")
+    pode_visualizar_relatorios = usuario_tem_permissao(usuario["id"], "relatorios.visualizar")
+    usuarios = (
+        listar_usuarios(executor_id=usuario["id"], para_relatorio=not pode_visualizar_usuarios)
+        if pode_visualizar_usuarios or pode_visualizar_relatorios else []
+    )
 
-    total = len(usuarios)
-    n_usuarios = sum(1 for u in usuarios if u["papel"] == "usuario")
-    n_analistas = sum(1 for u in usuarios if u["papel"] == "analista")
-    n_admins = sum(1 for u in usuarios if u["papel"] == "admin")
-
-    opcoes_navegacao = ["Usuários", "Departamentos", "Dashboards", "Privacidade"]
-    if st.session_state.get("usuario_admin_aberto"):
+    opcoes_navegacao = []
+    if pode_visualizar_usuarios or pode_gerenciar_usuarios:
+        opcoes_navegacao.append("Usuários")
+    if usuario_tem_permissao(usuario["id"], "departamentos.gerenciar"):
+        opcoes_navegacao.append("Departamentos")
+    if usuario_tem_permissao(usuario["id"], "perfis.gerenciar"):
+        opcoes_navegacao.append("Perfis e permissões")
+    if pode_visualizar_relatorios:
+        opcoes_navegacao.append("Dashboards")
+    if usuario_tem_permissao(usuario["id"], "privacidade.gerenciar"):
+        opcoes_navegacao.append("Privacidade")
+    if st.session_state.get("usuario_admin_aberto") and pode_gerenciar_usuarios:
         opcoes_navegacao.append("Perfil do usuário")
+
+    if not opcoes_navegacao:
+        st.info("Este perfil não possui funcionalidades administrativas adicionais.")
+        return
     navegacao = st.radio("Navegação administrativa", opcoes_navegacao, horizontal=True, key="admin_nav")
 
     if navegacao == "Dashboards":
-        chamados = listar_chamados(limite=5000)
+        chamados = listar_chamados(limite=5000, executor_id=usuario["id"], para_relatorio=True)
         relatorio_usuarios(usuarios)
         st.divider()
         relatorio_sla_desempenho(chamados)
@@ -1834,68 +2011,78 @@ def tela_admin(usuario):
     if navegacao == "Departamentos":
         painel_departamentos_admin(usuario)
 
+    if navegacao == "Perfis e permissões":
+        painel_perfis_admin(usuario)
+
     if navegacao == "Usuários":
         if st.session_state.get("mensagem_admin"):
             st.success(st.session_state.pop("mensagem_admin"))
-        with st.expander("Cadastrar usuário", expanded=False):
-            with st.form("form_novo_usuario", clear_on_submit=True):
-                departamentos_ativos = listar_departamentos(apenas_ativos=True)
-                departamentos_por_id = {departamento["id"]: departamento for departamento in departamentos_ativos}
-                col1, col2 = st.columns(2)
-                with col1:
-                    nome = st.text_input("Nome")
-                    sobrenome = st.text_input("Sobrenome")
-                    senha = st.text_input("Senha", type="password")
-                    telefone = st.text_input("Telefone (opcional)")
-                    cpf = st.text_input("CPF (opcional)", help="Usado apenas para identificação e busca de privacidade.")
-                with col2:
-                    email = st.text_input("E-mail")
-                    papel = st.selectbox("Perfil", options=["usuario", "analista", "admin"])
-                    departamento_id = st.selectbox(
-                        "Departamento",
-                        options=[None] + list(departamentos_por_id),
-                        format_func=lambda item: "Não informado" if item is None else departamentos_por_id[item]["nome"],
-                    )
-                    cargo = st.text_input("Cargo (opcional)")
-                cadastrar = st.form_submit_button("Cadastrar", type="primary")
-
-            if cadastrar:
-                outro_cpf = None
-                erro_cpf = None
-                if cpf and normalizar_cpf(cpf):
-                    try:
-                        outro_cpf = buscar_usuario_por_cpf(cpf)
-                    except ValueError as erro:
-                        erro_cpf = str(erro)
-                if not nome or not sobrenome or not email or not senha:
-                    st.warning("Nome, sobrenome, e-mail e senha são obrigatórios.")
-                elif cpf and not normalizar_cpf(cpf):
-                    st.warning("Informe um CPF válido.")
-                elif erro_cpf:
-                    st.error(erro_cpf)
-                elif buscar_usuario_por_email(email):
-                    st.error("Já existe um usuário cadastrado com esse e-mail.")
-                elif outro_cpf:
-                    st.error("Já existe uma conta com esse CPF.")
-                else:
-                    try:
-                        departamento = departamentos_por_id[departamento_id]["nome"] if departamento_id else None
-                        criar_usuario(
-                            nome, email, gerar_hash_senha(senha), papel,
-                            sobrenome=sobrenome, telefone=telefone or None, cpf=cpf or None,
-                            departamento=departamento, departamento_id=departamento_id, cargo=cargo or None,
-                            autor_id=usuario["id"],
+        if pode_gerenciar_usuarios:
+            with st.expander("Cadastrar usuário", expanded=False):
+                with st.form("form_novo_usuario", clear_on_submit=True):
+                    departamentos_ativos = listar_departamentos(apenas_ativos=True)
+                    departamentos_por_id = {departamento["id"]: departamento for departamento in departamentos_ativos}
+                    perfis_ativos = listar_perfis_para_atribuicao(usuario["id"])
+                    perfis_por_id = {perfil["id"]: perfil for perfil in perfis_ativos}
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        nome = st.text_input("Nome")
+                        sobrenome = st.text_input("Sobrenome")
+                        senha = st.text_input("Senha", type="password")
+                        telefone = st.text_input("Telefone (opcional)")
+                        cpf = st.text_input("CPF (opcional)", help="Usado apenas para identificação e busca de privacidade.")
+                    with col2:
+                        email = st.text_input("E-mail")
+                        perfil_id = st.selectbox(
+                            "Perfil de acesso",
+                            options=list(perfis_por_id),
+                            format_func=lambda item: perfis_por_id[item]["nome"],
                         )
-                        st.success(f"Usuário {email} cadastrado como '{papel}'.")
-                        st.rerun()
-                    except ValueError as erro:
-                        st.error(str(erro))
+                        departamento_id = st.selectbox(
+                            "Departamento",
+                            options=[None] + list(departamentos_por_id),
+                            format_func=lambda item: "Não informado" if item is None else departamentos_por_id[item]["nome"],
+                        )
+                        cargo = st.text_input("Cargo (opcional)")
+                    cadastrar = st.form_submit_button("Cadastrar", type="primary")
+
+                if cadastrar:
+                    outro_cpf = None
+                    erro_cpf = None
+                    if cpf and normalizar_cpf(cpf):
+                        try:
+                            outro_cpf = buscar_usuario_por_cpf(cpf)
+                        except ValueError as erro:
+                            erro_cpf = str(erro)
+                    if not nome or not sobrenome or not email or not senha:
+                        st.warning("Nome, sobrenome, e-mail e senha são obrigatórios.")
+                    elif cpf and not normalizar_cpf(cpf):
+                        st.warning("Informe um CPF válido.")
+                    elif erro_cpf:
+                        st.error(erro_cpf)
+                    elif buscar_usuario_por_email(email):
+                        st.error("Já existe um usuário cadastrado com esse e-mail.")
+                    elif outro_cpf:
+                        st.error("Já existe uma conta com esse CPF.")
+                    else:
+                        try:
+                            departamento = departamentos_por_id[departamento_id]["nome"] if departamento_id else None
+                            criar_usuario(
+                                nome, email, gerar_hash_senha(senha), "usuario",
+                                sobrenome=sobrenome, telefone=telefone or None, cpf=cpf or None,
+                                departamento=departamento, departamento_id=departamento_id, cargo=cargo or None,
+                                autor_id=usuario["id"], perfil_id=perfil_id,
+                            )
+                            st.success(f"Usuário {email} cadastrado no perfil '{perfis_por_id[perfil_id]['nome']}'.")
+                            st.rerun()
+                        except ValueError as erro:
+                            st.error(str(erro))
 
         if usuarios:
             filtro_usuario = st.text_input("Buscar por nome, e-mail ou perfil", key="filtro_usuarios").strip().lower()
             usuarios_filtrados = [
                 u for u in usuarios
-                if not filtro_usuario or filtro_usuario in f"{u['nome']} {u['email']} {u['papel']}".lower()
+                if not filtro_usuario or filtro_usuario in f"{u['nome']} {u['email']} {u.get('perfil_nome') or ''}".lower()
             ]
             st.caption(f"{len(usuarios_filtrados)} conta(s) encontrada(s).")
             cabecalho_tabela = st.columns([2, 2.4, 1, 1.4, 1])
@@ -1905,13 +2092,14 @@ def tela_admin(usuario):
                 col_nome, col_email, col_papel, col_login, col_acao = st.columns([2, 2.4, 1, 1.4, 1])
                 col_nome.write(f"{conta['nome']} {conta.get('sobrenome') or ''}".strip())
                 col_email.write(conta["email"])
-                col_papel.write(conta["papel"].capitalize())
+                col_papel.write(conta.get("perfil_nome") or "Sem perfil")
                 ultimo_login = conta.get("ultimo_login")
                 col_login.write(ultimo_login.strftime("%d/%m/%Y %H:%M") if ultimo_login else "Nunca acessou")
-                col_acao.button(
-                    "Abrir perfil", key=f"abrir_usuario_{conta['id']}",
-                    on_click=abrir_perfil_usuario_admin, args=(conta["id"],),
-                )
+                if pode_gerenciar_usuarios:
+                    col_acao.button(
+                        "Abrir perfil", key=f"abrir_usuario_{conta['id']}",
+                        on_click=abrir_perfil_usuario_admin, args=(conta["id"],),
+                    )
 
         else:
             st.info("Nenhum usuário cadastrado.")
@@ -1948,27 +2136,35 @@ def secao_configurar_autenticador(usuario):
                         st.error("Código incorreto. Tente novamente.")
 
 
-PAGINAS_POR_PAPEL = {
-    "usuario": ("pages/1_Portal_Usuario.py", "Portal do usuário", "🏠"),
-    "analista": ("pages/2_Atendimento.py", "Atendimento", "🛠️"),
-    "admin": ("pages/3_Administracao.py", "Administração", "🛡️"),
+PAGINAS_POR_PERMISSAO = {
+    "usuario": ("chamados.visualizar_proprios", "pages/1_Portal_Usuario.py", "Portal do usuário", "🏠"),
+    "analista": ("chamados.visualizar_fila", "pages/2_Atendimento.py", "Atendimento", "🛠️"),
+    "admin": ("administracao.acessar", "pages/3_Administracao.py", "Administração", "🛡️"),
 }
 
 
+def paginas_permitidas_usuario(usuario):
+    """Retorna as páginas cuja permissão está ativa no perfil atual do usuário."""
+    return {
+        chave: dados
+        for chave, dados in PAGINAS_POR_PERMISSAO.items()
+        if usuario_tem_permissao(usuario["id"], dados[0])
+    }
+
+
 def exibir_navegacao(usuario):
-    """Monta links de página compatíveis com o perfil autenticado."""
+    """Monta links de página conforme as permissões efetivas do perfil."""
+    paginas_permitidas = paginas_permitidas_usuario(usuario)
     with st.sidebar:
         st.write(f"Logado como **{usuario['nome']}**")
-        st.caption(f"Perfil: {usuario['papel'].capitalize()}")
+        st.caption("Acesso definido pelo perfil atribuído à sua conta.")
         st.divider()
         st.page_link("app.py", label="Início", icon="🏠")
 
-        pagina_permitida = PAGINAS_POR_PAPEL.get(usuario["papel"])
-        if pagina_permitida:
-            pagina, rotulo, icone = pagina_permitida
+        for _chave, (_permissao, pagina, rotulo, icone) in paginas_permitidas.items():
             st.page_link(pagina, label=rotulo, icon=icone)
 
-        if usuario["papel"] == "admin":
+        if usuario_eh_administrador(usuario["id"]):
             secao_configurar_autenticador(usuario)
         if st.button("Sair", use_container_width=True):
             sair()
@@ -2005,23 +2201,23 @@ def executar_aplicacao(pagina_solicitada=None):
         st.session_state.aceite_privacidade_validado = True
 
     if pagina_solicitada is None:
-        pagina_permitida = PAGINAS_POR_PAPEL.get(usuario["papel"])
-        if pagina_permitida:
-            st.switch_page(pagina_permitida[0])
-        st.error("Perfil desconhecido. Contate o administrador.")
+        paginas_permitidas = paginas_permitidas_usuario(usuario)
+        for chave in ("admin", "analista", "usuario"):
+            if chave in paginas_permitidas:
+                st.switch_page(paginas_permitidas[chave][1])
+        st.error("Seu perfil não possui acesso a nenhuma área do sistema. Contate o administrador.")
         return
 
     exibir_navegacao(usuario)
-    if pagina_solicitada and pagina_solicitada != usuario["papel"]:
+    paginas_permitidas = paginas_permitidas_usuario(usuario)
+    if pagina_solicitada not in paginas_permitidas:
         st.error("Você não tem permissão para acessar esta página.")
         st.page_link("app.py", label="Voltar ao início", icon="🏠")
         return
 
-    if usuario["papel"] == "usuario":
+    if pagina_solicitada == "usuario":
         tela_usuario(usuario)
-    elif usuario["papel"] == "analista":
+    elif pagina_solicitada == "analista":
         tela_analista(usuario)
-    elif usuario["papel"] == "admin":
+    elif pagina_solicitada == "admin":
         tela_admin(usuario)
-    else:
-        st.error("Perfil desconhecido. Contate o administrador.")
