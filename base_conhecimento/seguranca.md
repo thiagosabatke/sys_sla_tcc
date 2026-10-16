@@ -1,4 +1,5 @@
 ---
+publicado: true
 titulo: Segurança da informação e incidentes
 categoria: Outros
 resumo: Como abrir chamados sobre e-mails de phishing, suspeita de vírus ou ransomware, senha vazada, conta invadida ou envio de informação confidencial para o destinatário errado.

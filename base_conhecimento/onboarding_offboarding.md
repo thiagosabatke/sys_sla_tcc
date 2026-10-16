@@ -1,4 +1,5 @@
 ---
+publicado: true
 titulo: Admissão, mudança e desligamento de colaboradores
 categoria: Acesso
 resumo: Como abrir chamados para preparar acessos e equipamentos de um novo colaborador, mudança de função ou revogar acessos de um desligamento.

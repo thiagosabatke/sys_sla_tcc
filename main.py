@@ -1,9 +1,5 @@
 from ia_engine import classificar_chamado
-from database import (
-    salvar_chamado, criar_tabela_departamentos, criar_tabelas_rbac, criar_tabela_usuarios,
-    migrar_tabela_usuarios, migrar_usuarios_rbac,
-    migrar_departamentos_usuarios, criar_tabela_chamados, criar_tabela_auditoria,
-)
+from database import salvar_chamado
 from observability import configurar_logging
 import logging
 
@@ -39,15 +35,6 @@ def abrir_chamado(titulo, descricao):
 
 if __name__ == "__main__":
     configurar_logging()
-    criar_tabela_departamentos()
-    criar_tabelas_rbac()
-    criar_tabela_usuarios()
-    migrar_tabela_usuarios()
-    migrar_usuarios_rbac()
-    migrar_departamentos_usuarios()
-    criar_tabela_chamados()
-    criar_tabela_auditoria()
-
     abrir_chamado(
         titulo="Impressora não liga",
         descricao="a impressora do 3º andar não acende nenhuma luz, já tentei trocar a tomada",

@@ -1,4 +1,5 @@
 ---
+publicado: true
 titulo: E-mail, calendário e colaboração
 categoria: Software
 resumo: Como abrir chamados sobre e-mail corporativo que não envia ou recebe, caixa postal cheia, convite de reunião, videoconferência e compartilhamento de arquivos.

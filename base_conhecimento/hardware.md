@@ -1,4 +1,5 @@
 ---
+publicado: true
 titulo: Computadores, impressoras e periféricos
 categoria: Hardware
 resumo: Como abrir chamados sobre computador que não liga, tela preta, impressora que não imprime, teclado, mouse e outros equipamentos físicos com defeito.

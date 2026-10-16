@@ -15,8 +15,8 @@ _modelo_embeddings = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2"
 
 _trechos = []
 _vetores = None
-
 _artigos = {}
+_assinatura_indice = None
 
 
 def _extrair_frontmatter(conteudo):
@@ -53,8 +53,34 @@ def _dividir_em_secoes(corpo):
     return abertura, secoes
 
 
-def carregar_base():
-    global _trechos, _vetores, _artigos
+def _assinatura_arquivos():
+    if not os.path.isdir(PASTA_BASE):
+        return ()
+    assinatura = []
+    for nome in sorted(os.listdir(PASTA_BASE)):
+        if not nome.endswith(".md"):
+            continue
+        caminho = os.path.join(PASTA_BASE, nome)
+        with open(caminho, "r", encoding="utf-8") as arquivo:
+            metadados, _ = _extrair_frontmatter(arquivo.read())
+        if metadados.get("publicado", "false").strip().lower() in {"true", "sim", "1"}:
+            dados = os.stat(caminho)
+            assinatura.append((nome, dados.st_mtime_ns, dados.st_size))
+    return tuple(assinatura)
+
+
+def carregar_base(forcar=False):
+    """Só reindexa quando um artigo publicado ou caso aprovado mudou."""
+    global _trechos, _vetores, _artigos, _assinatura_indice
+
+    try:
+        casos = listar_casos_base_ia(uso_interno=True)
+    except Exception as erro:
+        logger.warning("Não foi possível carregar casos validados da IA: %s", erro)
+        casos = []
+    assinatura = (_assinatura_arquivos(), tuple((c["id"], str(c.get("confirmado_em"))) for c in casos))
+    if not forcar and _assinatura_indice == assinatura:
+        return
 
     _trechos = []
     _artigos = {}
@@ -72,6 +98,9 @@ def carregar_base():
             bruto = f.read()
 
         metadados, corpo = _extrair_frontmatter(bruto)
+        publicado = metadados.get("publicado", "false").strip().lower() in {"true", "sim", "1"}
+        if not publicado:
+            continue
         titulo = metadados.get("titulo") or nome_arquivo.replace(".md", "").replace("_", " ").title()
         categoria = metadados.get("categoria", "Outros")
         resumo = metadados.get("resumo", "")
@@ -104,11 +133,6 @@ def carregar_base():
             })
 
 
-    try:
-        casos = listar_casos_base_ia()
-    except Exception as erro:
-        logger.warning("Não foi possível carregar casos validados da IA: %s", erro)
-        casos = []
     for caso in casos:
         fonte = f"Caso validado #{caso['chamado_id']}"
         conteudo = (
@@ -140,6 +164,7 @@ def carregar_base():
     else:
         _vetores = None
         logger.warning("Nenhuma orientação .md encontrada na base de conhecimento.")
+    _assinatura_indice = assinatura
 
 
 def _similaridade_cosseno(a, b):
@@ -195,7 +220,10 @@ def buscar_contexto(texto_chamado, top_k=3, tipo=None):
 def listar_artigos():
     if not _artigos:
         carregar_base()
-    return sorted(_artigos.values(), key=lambda a: a["titulo"])
+    return sorted(
+        (artigo for artigo in _artigos.values() if artigo.get("tipo") == "procedimento_oficial"),
+        key=lambda a: a["titulo"],
+    )
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ titulo: Acesso, senhas e permissões
 categoria: Acesso
 resumo: Como abrir chamados sobre bloqueio de conta, redefinição de senha, autenticação em duas etapas (MFA) e solicitação, remoção ou alteração de acesso a sistemas, pastas e e-mail corporativo.
 tags: senha, esqueci a senha, conta bloqueada, login não funciona, autenticação de dois fatores, mfa, token, acesso negado, permissão, liberar acesso, cadastro de acesso, ex-colaborador com acesso
+publicado: true
 ---
 
 # Acesso, senhas e permissões

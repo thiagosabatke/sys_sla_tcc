@@ -2,11 +2,16 @@
 
 import sys
 import unittest
+import importlib
+from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
 
+# Permite executar este arquivo diretamente, além do unittest discovery/pytest.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 try:
-    import mysql.connector
+    importlib.import_module("mysql.connector")
 except ModuleNotFoundError:
     mysql = ModuleType("mysql")
     connector = ModuleType("mysql.connector")
@@ -16,7 +21,7 @@ except ModuleNotFoundError:
     sys.modules["mysql.connector"] = connector
 
 try:
-    import dotenv
+    importlib.import_module("dotenv")
 except ModuleNotFoundError:
     dotenv = ModuleType("dotenv")
     dotenv.load_dotenv = lambda: None

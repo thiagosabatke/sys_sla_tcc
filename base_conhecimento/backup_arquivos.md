@@ -1,4 +1,5 @@
 ---
+publicado: true
 titulo: Backup, arquivos e armazenamento
 categoria: Outros
 resumo: Como abrir chamados sobre recuperação de arquivos apagados, versões anteriores de documentos, falha de backup e falta de espaço em drive corporativo ou pasta de rede.

@@ -1,4 +1,5 @@
 ---
+publicado: true
 titulo: Dispositivos móveis e coletores
 categoria: Hardware
 resumo: Como abrir chamados sobre celular corporativo, tablet, coletor de código de barras e outros dispositivos móveis com defeito, sem carregar, sem wi-fi ou perdidos.

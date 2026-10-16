@@ -1,4 +1,5 @@
 ---
+publicado: true
 titulo: Internet, wi-fi e VPN
 categoria: Rede
 resumo: Como abrir chamados sobre internet fora do ar, wi-fi que não conecta ou cai, VPN de acesso remoto e pastas de rede compartilhadas inacessíveis.

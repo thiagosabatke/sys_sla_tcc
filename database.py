@@ -7,21 +7,29 @@ import zipfile
 import hashlib
 import hmac
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+import bcrypt
 import mysql.connector
 from dotenv import load_dotenv
 
-from sla import calcular_prazos
+import sla
 from observability import configurar_logging
 
 logger = logging.getLogger(__name__)
+
+
+def agora_utc():
+    """Data UTC sem tzinfo para compatibilidade com DATETIME/TIMESTAMP do MySQL."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 load_dotenv()
 
 TRANSICOES_STATUS = {
     "Novo": ("Em Andamento",),
     "Em Andamento": ("Em Espera", "Resolvido"),
-    "Em Espera": ("Em Andamento",),
+    # Depois da primeira resposta, o analista pode concluir o atendimento
+    # mesmo enquanto aguarda uma confirmação ou resposta do solicitante.
+    "Em Espera": ("Em Andamento", "Resolvido"),
     "Resolvido": ("Em Andamento",),
     "Fechado": (),
     "Cancelado": (),
@@ -30,7 +38,13 @@ TRANSICOES_STATUS = {
 CATEGORIAS_VALIDAS = {"Acesso", "Software", "Hardware", "Rede", "Outros"}
 URGENCIAS_VALIDAS = {"Baixa", "Media", "Alta", "Critica"}
 EQUIPES_VALIDAS = {"Suporte", "Software", "Hardware", "Redes"}
-VERSAO_POLITICA_PRIVACIDADE = os.getenv("POLITICA_PRIVACIDADE_VERSAO", "1.2.0")
+VERSAO_POLITICA_PRIVACIDADE = os.getenv("POLITICA_PRIVACIDADE_VERSAO", "1.3.0")
+MAX_TAMANHO_ANEXO_BYTES = 10 * 1024 * 1024
+MAX_TENTATIVAS_CODIGO = 5
+CRITERIOS_PROMOCAO_BASE_IA = (
+    "primeira resposta ao solicitante, diagnóstico e solução preenchidos, "
+    "classificação final válida e autorização explícita do analista responsável"
+)
 
 PERFIS_PADRAO_RBAC = (
     ("administrador", "Administrador", "Acesso administrativo completo ao sistema.", True),
@@ -59,6 +73,7 @@ PERMISSOES_PADRAO_RBAC = (
     ("departamentos.gerenciar", "Gerenciar departamentos", "Cadastrar e editar departamentos.", "Administração"),
     ("privacidade.gerenciar", "Gerenciar privacidade", "Atender solicitações de privacidade de titulares.", "Administração"),
     ("relatorios.visualizar", "Visualizar relatórios", "Acessar dashboards e relatórios administrativos.", "Administração"),
+    ("sla.gerenciar", "Configurar SLA", "Configurar horários comerciais, prazos e fechamento automático.", "Administração"),
     ("perfis.gerenciar", "Gerenciar perfis e permissões", "Criar, editar e administrar perfis de acesso.", "Administração"),
     ("administracao.acessar", "Acessar administração", "Acessar a área administrativa do sistema.", "Administração"),
 )
@@ -83,12 +98,19 @@ def status_disponiveis(status_atual):
 
 
 def conectar():
-    return mysql.connector.connect(
+    conn = mysql.connector.connect(
         host=os.getenv("DB_HOST"),
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
         database=os.getenv("DB_NAME"),
     )
+    # TIMESTAMP/CURRENT_TIMESTAMP e comparações do banco passam a usar UTC.
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SET time_zone = '+00:00'")
+    finally:
+        cursor.close()
+    return conn
 
 
 def _coluna_existe(cursor, tabela, coluna):
@@ -160,7 +182,7 @@ def registrar_login(usuario_id):
     conn = conectar()
     cursor = conn.cursor()
     try:
-        cursor.execute("UPDATE usuarios SET ultimo_login_em = %s WHERE id = %s", (datetime.now(), usuario_id))
+        cursor.execute("UPDATE usuarios SET ultimo_login_em = %s WHERE id = %s", (agora_utc(), usuario_id))
         _registrar_auditoria(cursor, usuario_id, "LOGIN_REALIZADO", "sessao")
         conn.commit()
     finally:
@@ -243,7 +265,7 @@ def criar_tabelas_privacidade():
     cursor.execute(
         """INSERT IGNORE INTO politicas_privacidade (versao, conteudo_hash, publicada_em)
            VALUES (%s, %s, %s)""",
-        (VERSAO_POLITICA_PRIVACIDADE, _hash_politica_privacidade(), datetime.now()),
+        (VERSAO_POLITICA_PRIVACIDADE, _hash_politica_privacidade(), agora_utc()),
     )
     conn.commit()
     cursor.close()
@@ -269,7 +291,7 @@ def usuario_aceitou_politica(usuario_id, finalidade="uso_do_sistema"):
 def registrar_aceite_privacidade(usuario_id, finalidade, autor_id=None):
     conn = conectar()
     cursor = conn.cursor()
-    agora = datetime.now()
+    agora = agora_utc()
     cursor.execute(
         """INSERT INTO aceites_privacidade (usuario_id, politica_versao, finalidade, aceito_em)
            VALUES (%s, %s, %s, %s)""",
@@ -284,19 +306,34 @@ def registrar_aceite_privacidade(usuario_id, finalidade, autor_id=None):
     conn.close()
 
 
-def listar_auditoria(limite=200, usuario_id=None):
+def listar_auditoria(limite=100, usuario_id=None, acao=None, entidade=None,
+                     resultado=None, inicio=None, fim=None, pagina=0, executor_id=None):
+    exigir_permissao(executor_id, "relatorios.visualizar")
+    limite = max(1, min(int(limite), 200))
+    pagina = max(0, int(pagina))
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     consulta = """SELECT a.id, a.criado_em, a.usuario_id, a.acao, a.entidade,
                          a.entidade_id, a.resultado, a.detalhes, u.nome AS nome_usuario
                   FROM auditoria a
                   LEFT JOIN usuarios u ON u.id = a.usuario_id"""
-    parametros = [limite]
+    filtros, parametros = [], []
     if usuario_id is not None:
-        consulta += " WHERE a.usuario_id = %s"
-        parametros.insert(0, usuario_id)
-    consulta += " ORDER BY a.id DESC LIMIT %s"
-    cursor.execute(consulta, tuple(parametros))
+        filtros.append("a.usuario_id = %s"); parametros.append(usuario_id)
+    if acao:
+        filtros.append("a.acao = %s"); parametros.append(acao)
+    if entidade:
+        filtros.append("a.entidade = %s"); parametros.append(entidade)
+    if resultado:
+        filtros.append("a.resultado = %s"); parametros.append(resultado)
+    if inicio:
+        filtros.append("a.criado_em >= %s"); parametros.append(inicio)
+    if fim:
+        filtros.append("a.criado_em < %s"); parametros.append(fim)
+    if filtros:
+        consulta += " WHERE " + " AND ".join(filtros)
+    consulta += " ORDER BY a.id DESC LIMIT %s OFFSET %s"
+    cursor.execute(consulta, (*parametros, limite, pagina * limite))
     eventos = cursor.fetchall()
     cursor.close()
     conn.close()
@@ -789,6 +826,60 @@ def criar_tabela_usuarios():
     logger.debug("Tabela de usuários verificada.")
 
 
+def criar_tabela_configuracao_sla():
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS configuracoes_sla (
+            id TINYINT PRIMARY KEY,
+            configuracao JSON NOT NULL,
+            atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            atualizado_por INT NULL,
+            CONSTRAINT fk_configuracoes_sla_usuario FOREIGN KEY (atualizado_por)
+                REFERENCES usuarios(id) ON DELETE SET NULL
+        )
+    """)
+    cursor.execute(
+        "INSERT IGNORE INTO configuracoes_sla (id, configuracao) VALUES (1, %s)",
+        (json.dumps(sla.CONFIGURACAO_PADRAO),),
+    )
+    conn.commit(); cursor.close(); conn.close()
+
+
+def obter_configuracao_sla():
+    conn = conectar(); cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT configuracao FROM configuracoes_sla WHERE id = 1")
+        registro = cursor.fetchone()
+        return sla.normalizar_configuracao(registro["configuracao"] if registro else None)
+    finally:
+        cursor.close(); conn.close()
+
+
+def atualizar_configuracao_sla(configuracao, autor_id):
+    exigir_permissao(autor_id, "sla.gerenciar")
+    configuracao = sla.normalizar_configuracao(configuracao)
+    if not configuracao["dias_uteis"]:
+        raise ValueError("Selecione pelo menos um dia de atendimento.")
+    if not 0 < configuracao["limiar_risco"] < 1:
+        raise ValueError("O limiar de risco deve estar entre 1% e 99%.")
+    if not 1 <= configuracao["horas_fechamento_automatico"] <= 720:
+        raise ValueError("O fechamento automático deve estar entre 1 e 720 horas comerciais.")
+    for urgencia in URGENCIAS_VALIDAS:
+        item = configuracao["matriz"].get(urgencia, {})
+        if not isinstance(item.get("resposta"), (int, float)) or not isinstance(item.get("resolucao"), (int, float)) or item["resposta"] <= 0 or item["resolucao"] <= 0:
+            raise ValueError(f"Prazos inválidos para urgência {urgencia}.")
+    conn = conectar(); cursor = conn.cursor()
+    try:
+        cursor.execute("UPDATE configuracoes_sla SET configuracao = %s, atualizado_por = %s WHERE id = 1", (json.dumps(configuracao), autor_id))
+        _registrar_auditoria(cursor, autor_id, "CONFIGURACAO_SLA_ATUALIZADA", "configuracao_sla", 1)
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+    finally:
+        cursor.close(); conn.close()
+
+
 def migrar_tabela_usuarios():
     conn = conectar()
     cursor = conn.cursor()
@@ -900,6 +991,7 @@ def criar_tabela_chamados():
             categoria_ia VARCHAR(100),
             urgencia_ia VARCHAR(50),
             equipe_ia VARCHAR(100),
+            metadados_ia JSON NULL,
             categoria_final VARCHAR(100) NULL,
             urgencia_final VARCHAR(50) NULL,
             equipe_final VARCHAR(100) NULL,
@@ -926,7 +1018,8 @@ def criar_tabela_chamados():
             primeira_resposta_em DATETIME NULL,
             resolvido_em DATETIME NULL,
             pausado_em DATETIME NULL,
-            tempo_pausado_min INT DEFAULT 0,
+            tempo_pausado_min DECIMAL(10,2) DEFAULT 0,
+            sla_configuracao JSON NULL,
 
             CONSTRAINT fk_chamados_usuario FOREIGN KEY (usuario_id)
                 REFERENCES usuarios(id) ON DELETE SET NULL,
@@ -938,6 +1031,41 @@ def criar_tabela_chamados():
     cursor.close()
     conn.close()
     logger.debug("Tabela de chamados verificada.")
+
+
+def criar_tabela_historico_chamados():
+    conn = conectar(); cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS historico_chamados (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            chamado_id INT NOT NULL,
+            autor_id INT NULL,
+            tipo VARCHAR(50) NOT NULL,
+            detalhes JSON NULL,
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (chamado_id) REFERENCES chamados(id) ON DELETE CASCADE,
+            FOREIGN KEY (autor_id) REFERENCES usuarios(id) ON DELETE SET NULL,
+            INDEX idx_historico_chamado_data (chamado_id, criado_em)
+        )
+    """)
+    conn.commit(); cursor.close(); conn.close()
+
+
+def _registrar_historico_chamado(cursor, chamado_id, autor_id, tipo, detalhes=None):
+    cursor.execute(
+        "INSERT INTO historico_chamados (chamado_id, autor_id, tipo, detalhes) VALUES (%s, %s, %s, %s)",
+        (chamado_id, autor_id, tipo, json.dumps(detalhes, ensure_ascii=False) if detalhes else None),
+    )
+
+
+def listar_historico_chamado(chamado_id, executor_id):
+    _exigir_acesso_chamado(chamado_id, executor_id, "chamados.visualizar_proprios", "chamados.visualizar_fila")
+    conn = conectar(); cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT h.*, u.nome AS autor_nome FROM historico_chamados h LEFT JOIN usuarios u ON u.id = h.autor_id WHERE h.chamado_id = %s ORDER BY h.criado_em", (chamado_id,))
+        return cursor.fetchall()
+    finally:
+        cursor.close(); conn.close()
 
 
 def migrar_tabela_chamados():
@@ -952,6 +1080,7 @@ def migrar_tabela_chamados():
         "categoria_ia": "VARCHAR(100)",
         "urgencia_ia": "VARCHAR(50)",
         "equipe_ia": "VARCHAR(100)",
+        "metadados_ia": "JSON NULL",
         "categoria_final": "VARCHAR(100) NULL",
         "urgencia_final": "VARCHAR(50) NULL",
         "equipe_final": "VARCHAR(100) NULL",
@@ -968,13 +1097,22 @@ def migrar_tabela_chamados():
         "primeira_resposta_em": "DATETIME NULL",
         "resolvido_em": "DATETIME NULL",
         "pausado_em": "DATETIME NULL",
-        "tempo_pausado_min": "INT DEFAULT 0",
+        "tempo_pausado_min": "DECIMAL(10,2) DEFAULT 0",
+        "sla_configuracao": "JSON NULL",
     }
     for nome_coluna, tipo in colunas_novas.items():
         if not _coluna_existe(cursor, "chamados", nome_coluna):
             cursor.execute(f"ALTER TABLE chamados ADD COLUMN {nome_coluna} {tipo}")
             conn.commit()
             logger.info("Migração aplicada: coluna %s adicionada em chamados.", nome_coluna)
+    for nome_indice, colunas in (
+        ("idx_chamados_status_urgencia_criado", "status, urgencia, criado_em"),
+        ("idx_chamados_analista_status", "analista_id, status, criado_em"),
+        ("idx_chamados_usuario_criado", "usuario_id, criado_em"),
+        ("idx_chamados_prazos", "prazo_resposta, prazo_resolucao"),
+    ):
+        if not _indice_existe(cursor, "chamados", nome_indice):
+            cursor.execute(f"CREATE INDEX {nome_indice} ON chamados ({colunas})")
 
     if _coluna_existe(cursor, "chamados", "titulo_resumido"):
         cursor.execute(
@@ -1105,8 +1243,10 @@ def migrar_tabela_base_casos_ia():
     conn.close()
 
 
-def listar_casos_base_ia():
-    """Retorna exclusivamente os casos selecionados para orientar a IA."""
+def listar_casos_base_ia(executor_id=None, uso_interno=False):
+    """Retorna casos autorizados para RAG interno ou para relatórios administrativos."""
+    if not uso_interno:
+        exigir_permissao(executor_id, "relatorios.visualizar")
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("""
@@ -1124,35 +1264,51 @@ def listar_casos_base_ia():
 
 def salvar_chamado(titulo, descricao, categoria, urgencia, confiabilidade=None,
                     sla_resposta=None, sla_resolucao=None, equipe_destino=None,
-                    usuario_id=None):
+                    usuario_id=None, metadados_ia=None):
     exigir_permissao(usuario_id, "chamados.abrir")
-    criado_em = datetime.now()
-    prazo_resposta, prazo_resolucao = calcular_prazos(criado_em, urgencia)
+    titulo = (titulo or "").strip()
+    descricao = (descricao or "").strip()
+    if not titulo or not descricao:
+        raise ValueError("Título e descrição são obrigatórios.")
+    if categoria not in CATEGORIAS_VALIDAS:
+        raise ValueError("Categoria inválida.")
+    if urgencia not in URGENCIAS_VALIDAS:
+        raise ValueError("Urgência inválida.")
+    if equipe_destino not in EQUIPES_VALIDAS:
+        raise ValueError("Equipe de destino inválida.")
+    if confiabilidade not in {None, "Alta", "Media", "Baixa"}:
+        raise ValueError("Confiabilidade inválida.")
+    criado_em = agora_utc()
+    configuracao_sla = obter_configuracao_sla()
+    prazo_resposta, prazo_resolucao = sla.calcular_prazos(criado_em, urgencia, configuracao_sla)
 
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
         """INSERT INTO chamados
            (titulo, descricao, categoria, urgencia, confiabilidade, equipe_destino,
-            categoria_ia, urgencia_ia, equipe_ia,
-            sla_resposta, sla_resolucao, usuario_id, criado_em, prazo_resposta, prazo_resolucao)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            categoria_ia, urgencia_ia, equipe_ia, metadados_ia,
+            sla_resposta, sla_resolucao, usuario_id, criado_em, prazo_resposta, prazo_resolucao, sla_configuracao)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
         (titulo, descricao, categoria, urgencia, confiabilidade, equipe_destino,
-         categoria, urgencia, equipe_destino,
-         sla_resposta, sla_resolucao, usuario_id, criado_em, prazo_resposta, prazo_resolucao),
+         categoria, urgencia, equipe_destino, json.dumps(metadados_ia or {}, ensure_ascii=False),
+         sla_resposta, sla_resolucao, usuario_id, criado_em, prazo_resposta, prazo_resolucao, json.dumps(configuracao_sla)),
     )
     novo_id = cursor.lastrowid
     _registrar_auditoria(
         cursor, usuario_id, "CHAMADO_ABERTO", "chamado", novo_id,
         detalhes={"categoria": categoria, "urgencia": urgencia},
     )
+    _registrar_historico_chamado(cursor, novo_id, usuario_id, "ABERTURA", {"categoria": categoria, "urgencia": urgencia, "equipe": equipe_destino})
     conn.commit()
     cursor.close()
     conn.close()
     return novo_id
 
 
-def listar_chamados(limite=20, usuario_id=None, executor_id=None, para_relatorio=False):
+def listar_chamados(limite=20, usuario_id=None, executor_id=None, para_relatorio=False, pagina=0):
+    limite = max(1, min(int(limite), 200))
+    pagina = max(0, int(pagina))
     if usuario_id is not None:
         if executor_id != usuario_id and not usuario_eh_administrador(executor_id):
             raise PermissionError("Você não tem permissão para consultar chamados de outro usuário.")
@@ -1165,19 +1321,19 @@ def listar_chamados(limite=20, usuario_id=None, executor_id=None, para_relatorio
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     base_query = """
-        SELECT c.*, u.nome AS nome_usuario, a.nome AS nome_analista
+        SELECT c.*, u.nome AS nome_usuario, u.departamento AS departamento_usuario, a.nome AS nome_analista
         FROM chamados c
         LEFT JOIN usuarios u ON c.usuario_id = u.id
         LEFT JOIN usuarios a ON c.analista_id = a.id
     """
     if usuario_id is not None:
         cursor.execute(
-            base_query + " WHERE c.usuario_id = %s ORDER BY c.criado_em DESC LIMIT %s",
-            (usuario_id, limite),
+            base_query + " WHERE c.usuario_id = %s ORDER BY c.criado_em DESC LIMIT %s OFFSET %s",
+            (usuario_id, limite, pagina * limite),
         )
     else:
         cursor.execute(
-            base_query + " ORDER BY c.criado_em DESC LIMIT %s", (limite,)
+            base_query + " ORDER BY c.criado_em DESC LIMIT %s OFFSET %s", (limite, pagina * limite)
         )
     resultados = cursor.fetchall()
     cursor.close()
@@ -1207,12 +1363,12 @@ def buscar_chamado_por_id(chamado_id, executor_id):
 
 
 def _atualizar_status_chamado(chamado_id, novo_status, autor_id=None):
-    agora = datetime.now()
+    agora = agora_utc()
 
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
-        "SELECT status, pausado_em, tempo_pausado_min, resolvido_em FROM chamados WHERE id = %s",
+        "SELECT status, pausado_em, tempo_pausado_min, resolvido_em, sla_configuracao FROM chamados WHERE id = %s FOR UPDATE",
         (chamado_id,),
     )
     atual = cursor.fetchone()
@@ -1240,7 +1396,7 @@ def _atualizar_status_chamado(chamado_id, novo_status, autor_id=None):
         pausado_em_novo = agora
     elif status_atual == "Em Espera" and novo_status != "Em Espera":
         if atual["pausado_em"]:
-            tempo_pausado_min_novo += (agora - atual["pausado_em"]).total_seconds() / 60
+            tempo_pausado_min_novo += sla.minutos_uteis_entre(atual["pausado_em"], agora, atual.get("sla_configuracao"))
         pausado_em_novo = None
 
     if novo_status in ("Resolvido", "Fechado"):
@@ -1253,13 +1409,19 @@ def _atualizar_status_chamado(chamado_id, novo_status, autor_id=None):
     cursor.execute(
         """UPDATE chamados
            SET status = %s, pausado_em = %s, tempo_pausado_min = %s, resolvido_em = %s
-           WHERE id = %s""",
-        (novo_status, pausado_em_novo, tempo_pausado_min_novo, resolvido_em_novo, chamado_id),
+           WHERE id = %s AND status = %s""",
+        (novo_status, pausado_em_novo, tempo_pausado_min_novo, resolvido_em_novo, chamado_id, status_atual),
     )
+    if cursor.rowcount != 1:
+        conn.rollback()
+        cursor.close()
+        conn.close()
+        raise ValueError("O chamado foi alterado por outro atendimento; atualize a tela e tente novamente.")
     _registrar_auditoria(
         cursor, autor_id, "STATUS_ALTERADO", "chamado", chamado_id,
         detalhes={"anterior": status_atual, "novo": novo_status},
     )
+    _registrar_historico_chamado(cursor, chamado_id, autor_id, "STATUS_ALTERADO", {"anterior": status_atual, "novo": novo_status})
     conn.commit()
     cursor.close()
     conn.close()
@@ -1267,6 +1429,18 @@ def _atualizar_status_chamado(chamado_id, novo_status, autor_id=None):
 
 def atualizar_status_chamado(chamado_id, novo_status, autor_id=None):
     exigir_permissao(autor_id, "chamados.alterar_status")
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT analista_id FROM chamados WHERE id = %s", (chamado_id,))
+        chamado = cursor.fetchone()
+        if not chamado:
+            raise ValueError("Chamado não encontrado.")
+        if chamado["analista_id"] != autor_id and not usuario_eh_administrador(autor_id):
+            raise PermissionError("Somente o analista responsável pode alterar o status deste chamado.")
+    finally:
+        cursor.close()
+        conn.close()
     return _atualizar_status_chamado(chamado_id, novo_status, autor_id)
 
 
@@ -1289,7 +1463,7 @@ def registrar_resolucao_chamado(chamado_id, analista_id, diagnostico, solucao,
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
-        """SELECT c.status, c.analista_id, c.titulo, c.descricao,
+        """SELECT c.status, c.analista_id, c.primeira_resposta_em, c.titulo, c.descricao,
                   c.categoria_ia, c.urgencia_ia, c.equipe_ia, c.confiabilidade,
                   u.nome, u.sobrenome, u.email, u.telefone
            FROM chamados c LEFT JOIN usuarios u ON u.id = c.usuario_id
@@ -1297,13 +1471,22 @@ def registrar_resolucao_chamado(chamado_id, analista_id, diagnostico, solucao,
         (chamado_id,),
     )
     chamado = cursor.fetchone()
-    if not chamado or (chamado["analista_id"] != analista_id and not usuario_eh_administrador(analista_id)) or chamado["status"] != "Em Andamento":
+    if not chamado or (chamado["analista_id"] != analista_id and not usuario_eh_administrador(analista_id)) or chamado["status"] not in ("Em Andamento", "Em Espera"):
         cursor.close()
         conn.close()
-        raise ValueError("Somente o analista responsável pode registrar a resolução deste chamado.")
+        raise ValueError("Somente o analista responsável pode resolver um chamado em atendimento ou aguardando o solicitante.")
+    if not chamado["primeira_resposta_em"]:
+        cursor.close()
+        conn.close()
+        raise ValueError("Envie a primeira mensagem ao solicitante antes de registrar a resolução.")
+    # Critérios formais para a curadoria interna: não entra automaticamente por estar resolvido.
+    if compartilhar_conhecimento and (not diagnostico or not solucao):
+        cursor.close()
+        conn.close()
+        raise ValueError(f"Caso interno exige {CRITERIOS_PROMOCAO_BASE_IA}.")
     cursor.close()
 
-    agora = datetime.now()
+    agora = agora_utc()
     cursor = conn.cursor()
     cursor.execute(
         """UPDATE chamados
@@ -1311,12 +1494,13 @@ def registrar_resolucao_chamado(chamado_id, analista_id, diagnostico, solucao,
                compartilhar_conhecimento = %s,
                categoria = %s, urgencia = %s, equipe_destino = %s,
                categoria_final = %s, urgencia_final = %s, equipe_final = %s,
-               status = 'Resolvido', resolvido_em = %s
+               status = 'Resolvido', resolvido_em = %s,
+               uso_ia_autorizado_em = %s
            WHERE id = %s""",
         (diagnostico, solucao, bool(compartilhar_conhecimento),
          categoria_final, urgencia_final, equipe_final,
          categoria_final, urgencia_final, equipe_final,
-         agora, chamado_id),
+         agora, agora if compartilhar_conhecimento else None, chamado_id),
     )
     classificacao_corrigida = any((
         chamado["categoria_ia"] != categoria_final,
@@ -1330,6 +1514,7 @@ def registrar_resolucao_chamado(chamado_id, analista_id, diagnostico, solucao,
             "classificacao_corrigida": classificacao_corrigida,
         },
     )
+    _registrar_historico_chamado(cursor, chamado_id, analista_id, "RESOLUCAO", {"classificacao_corrigida": classificacao_corrigida, "compartilhar_conhecimento": bool(compartilhar_conhecimento)})
     if compartilhar_conhecimento:
         chamado.update({
             "categoria_final": categoria_final,
@@ -1367,9 +1552,78 @@ def atribuir_chamado(chamado_id, analista_id):
         cursor, analista_id, "CHAMADO_ATRIBUIDO", "chamado", chamado_id,
         detalhes={"analista_id": analista_id, "status_anterior": "Novo", "status_novo": "Em Andamento"},
     )
+    _registrar_historico_chamado(cursor, chamado_id, analista_id, "ATRIBUICAO", {"analista_id": analista_id})
     conn.commit()
     cursor.close()
     conn.close()
+
+
+def transferir_chamado(chamado_id, novo_analista_id, motivo, autor_id):
+    """Transfere chamado ativo; responsável atual ou administrador deve justificar."""
+    motivo = (motivo or "").strip()
+    if not motivo:
+        raise ValueError("Informe o motivo da transferência.")
+    exigir_permissao(autor_id, "chamados.alterar_status")
+    if not usuario_tem_permissao(novo_analista_id, "chamados.assumir"):
+        raise ValueError("O novo responsável não possui permissão de atendimento.")
+    conn = conectar(); cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT analista_id, status FROM chamados WHERE id = %s FOR UPDATE", (chamado_id,))
+        chamado = cursor.fetchone()
+        if not chamado or chamado["status"] in {"Fechado", "Cancelado"}:
+            raise ValueError("O chamado não está disponível para transferência.")
+        if chamado["analista_id"] != autor_id and not usuario_eh_administrador(autor_id):
+            raise PermissionError("Somente o analista responsável pode transferir este chamado.")
+        cursor.execute("UPDATE chamados SET analista_id = %s WHERE id = %s", (novo_analista_id, chamado_id))
+        _registrar_auditoria(cursor, autor_id, "CHAMADO_TRANSFERIDO", "chamado", chamado_id, detalhes={"novo_analista_id": novo_analista_id, "motivo": motivo})
+        _registrar_historico_chamado(cursor, chamado_id, autor_id, "TRANSFERENCIA", {"anterior": chamado["analista_id"], "novo": novo_analista_id, "motivo": motivo})
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+    finally:
+        cursor.close(); conn.close()
+
+
+def listar_analistas_para_transferencia(executor_id):
+    exigir_permissao(executor_id, "chamados.alterar_status")
+    conn = conectar(); cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""SELECT DISTINCT u.id, u.nome, u.sobrenome, u.email
+                          FROM usuarios u
+                          JOIN perfis p ON p.id = u.perfil_id
+                          LEFT JOIN perfil_permissoes pp ON pp.perfil_id = p.id
+                          LEFT JOIN permissoes pm ON pm.id = pp.permissao_id
+                          WHERE u.conta_anonimizada_em IS NULL AND p.ativo = TRUE
+                            AND (p.chave = 'administrador' OR pm.codigo = 'chamados.assumir')
+                          ORDER BY u.nome""")
+        return cursor.fetchall()
+    finally:
+        cursor.close(); conn.close()
+
+
+def escalar_chamado(chamado_id, urgencia, equipe, motivo, autor_id):
+    """Registra escalonamento de urgência/equipe pelo responsável ou administrador."""
+    motivo = (motivo or "").strip()
+    if urgencia not in URGENCIAS_VALIDAS or equipe not in EQUIPES_VALIDAS or not motivo:
+        raise ValueError("Informe urgência, equipe e motivo válidos para o escalonamento.")
+    exigir_permissao(autor_id, "chamados.alterar_status")
+    conn = conectar(); cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT analista_id, urgencia, equipe_destino, status FROM chamados WHERE id = %s FOR UPDATE", (chamado_id,))
+        chamado = cursor.fetchone()
+        if not chamado or chamado["status"] in {"Fechado", "Cancelado"}:
+            raise ValueError("O chamado não está disponível para escalonamento.")
+        if chamado["analista_id"] != autor_id and not usuario_eh_administrador(autor_id):
+            raise PermissionError("Somente o analista responsável pode escalar este chamado.")
+        cursor.execute("UPDATE chamados SET urgencia = %s, equipe_destino = %s WHERE id = %s", (urgencia, equipe, chamado_id))
+        detalhes = {"urgencia_anterior": chamado["urgencia"], "urgencia_nova": urgencia, "equipe_anterior": chamado["equipe_destino"], "equipe_nova": equipe, "motivo": motivo}
+        _registrar_auditoria(cursor, autor_id, "CHAMADO_ESCALADO", "chamado", chamado_id, detalhes=detalhes)
+        _registrar_historico_chamado(cursor, chamado_id, autor_id, "ESCALONAMENTO", detalhes)
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+    finally:
+        cursor.close(); conn.close()
 
 
 def cancelar_chamado_sem_atribuicao(chamado_id, motivo, autor_id=None):
@@ -1399,6 +1653,7 @@ def cancelar_chamado_sem_atribuicao(chamado_id, motivo, autor_id=None):
         cursor, autor_id, "CHAMADO_CANCELADO", "chamado", chamado_id,
         detalhes={"status_anterior": "Novo"},
     )
+    _registrar_historico_chamado(cursor, chamado_id, autor_id, "CANCELAMENTO", {"motivo": motivo.strip()})
     conn.commit()
     cursor.close()
     conn.close()
@@ -1471,13 +1726,17 @@ def confirmar_resolucao_usuario(chamado_id, usuario_id):
         cursor, usuario_id, "RESOLUCAO_CONFIRMADA", "chamado", chamado_id,
         detalhes={"status_anterior": "Resolvido", "status_novo": "Fechado"},
     )
+    _registrar_historico_chamado(cursor, chamado_id, usuario_id, "FECHAMENTO_CONFIRMADO")
     conn.commit()
     cursor.close()
     conn.close()
 
 
-def reabrir_chamado_usuario(chamado_id, usuario_id):
+def reabrir_chamado_usuario(chamado_id, usuario_id, motivo):
     exigir_permissao(usuario_id, "chamados.confirmar_resolucao")
+    motivo = (motivo or "").strip()
+    if not motivo:
+        raise ValueError("Informe o motivo da reabertura.")
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
@@ -1494,9 +1753,38 @@ def reabrir_chamado_usuario(chamado_id, usuario_id):
         cursor, usuario_id, "CHAMADO_REABERTO", "chamado", chamado_id,
         detalhes={"status_anterior": "Resolvido", "status_novo": "Em Andamento"},
     )
+    _registrar_historico_chamado(cursor, chamado_id, usuario_id, "REABERTURA", {"motivo": motivo})
     conn.commit()
     cursor.close()
     conn.close()
+
+
+def fechar_chamados_resolvidos_automaticamente(agora=None):
+    """Fecha chamados resolvidos sem ação do solicitante após o prazo comercial configurado."""
+    agora = agora or agora_utc()
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id, resolvido_em, sla_configuracao FROM chamados WHERE status = 'Resolvido' AND resolvido_em IS NOT NULL FOR UPDATE")
+        chamados = cursor.fetchall()
+        fechados = []
+        for chamado in chamados:
+            configuracao = sla.normalizar_configuracao(chamado.get("sla_configuracao") or {"usar_horario_comercial": False})
+            prazo_minutos = configuracao["horas_fechamento_automatico"] * 60
+            if sla.minutos_uteis_entre(chamado["resolvido_em"], agora, configuracao) >= prazo_minutos:
+                cursor.execute("UPDATE chamados SET status = 'Fechado' WHERE id = %s AND status = 'Resolvido'", (chamado["id"],))
+                if cursor.rowcount:
+                    _registrar_auditoria(cursor, None, "CHAMADO_FECHADO_AUTOMATICAMENTE", "chamado", chamado["id"])
+                    _registrar_historico_chamado(cursor, chamado["id"], None, "FECHAMENTO_AUTOMATICO")
+                    fechados.append(chamado["id"])
+        conn.commit()
+        return fechados
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def criar_tabela_mensagens():
@@ -1520,20 +1808,21 @@ def criar_tabela_mensagens():
     logger.debug("Tabela de mensagens verificada.")
 
 
-def listar_mensagens_chamado(chamado_id, executor_id):
+def listar_mensagens_chamado(chamado_id, executor_id, limite=100, pagina=0):
     _exigir_acesso_chamado(
         chamado_id, executor_id, "chamados.visualizar_proprios", "chamados.visualizar_fila",
     )
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
-        "SELECT * FROM mensagens_chamado WHERE chamado_id = %s ORDER BY criado_em ASC",
-        (chamado_id,),
+        """SELECT id, chamado_id, autor_id, autor_nome, autor_papel, mensagem, criado_em
+           FROM mensagens_chamado WHERE chamado_id = %s ORDER BY criado_em DESC LIMIT %s OFFSET %s""",
+        (chamado_id, max(1, min(int(limite), 200)), max(0, int(pagina)) * max(1, min(int(limite), 200))),
     )
     resultados = cursor.fetchall()
     cursor.close()
     conn.close()
-    return resultados
+    return list(reversed(resultados))
 
 
 def enviar_mensagem_chamado(chamado_id, autor_id, autor_nome, autor_papel, mensagem):
@@ -1574,7 +1863,7 @@ def enviar_mensagem_chamado(chamado_id, autor_id, autor_nome, autor_papel, mensa
     if acao_analista:
         cursor.execute(
             "UPDATE chamados SET primeira_resposta_em = COALESCE(primeira_resposta_em, %s) WHERE id = %s",
-            (datetime.now(), chamado_id),
+            (agora_utc(), chamado_id),
         )
     conn.commit()
 
@@ -1611,6 +1900,17 @@ def criar_tabela_anexos():
 
 
 def salvar_anexo_chamado(chamado_id, autor_id, nome_arquivo, tipo_arquivo, conteudo):
+    nome_arquivo = os.path.basename((nome_arquivo or "").strip())
+    if not nome_arquivo:
+        raise ValueError("Informe um nome de arquivo válido.")
+    if not conteudo:
+        raise ValueError("Não é permitido enviar anexo vazio.")
+    if len(conteudo) > MAX_TAMANHO_ANEXO_BYTES:
+        raise ValueError("O anexo deve ter no máximo 10 MB.")
+    if len(nome_arquivo) > 255:
+        raise ValueError("O nome do arquivo é muito longo.")
+    if tipo_arquivo and len(tipo_arquivo) > 120:
+        raise ValueError("Tipo de arquivo inválido.")
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute("SELECT status, usuario_id, analista_id FROM chamados WHERE id = %s", (chamado_id,))
@@ -1653,7 +1953,7 @@ def listar_anexos_chamado(chamado_id, executor_id):
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
-        """SELECT id, nome_arquivo, tipo_arquivo, conteudo, criado_em
+        """SELECT id, nome_arquivo, tipo_arquivo, OCTET_LENGTH(conteudo) AS tamanho_bytes, criado_em
            FROM anexos_chamado WHERE chamado_id = %s ORDER BY criado_em ASC""",
         (chamado_id,),
     )
@@ -1661,6 +1961,25 @@ def listar_anexos_chamado(chamado_id, executor_id):
     cursor.close()
     conn.close()
     return resultados
+
+
+def baixar_anexo_chamado(anexo_id, chamado_id, executor_id):
+    """Busca o binário somente quando o usuário solicita o download."""
+    _exigir_acesso_chamado(chamado_id, executor_id, "chamados.visualizar_proprios", "chamados.visualizar_fila")
+    conn = conectar(); cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            """SELECT nome_arquivo, tipo_arquivo, conteudo FROM anexos_chamado
+               WHERE id = %s AND chamado_id = %s""", (anexo_id, chamado_id),
+        )
+        anexo = cursor.fetchone()
+        if not anexo:
+            raise ValueError("Anexo não encontrado.")
+        _registrar_auditoria(cursor, executor_id, "ANEXO_BAIXADO", "anexo", anexo_id)
+        conn.commit()
+        return anexo
+    finally:
+        cursor.close(); conn.close()
 
 
 def criar_tabela_pesquisas_satisfacao():
@@ -1681,7 +2000,10 @@ def criar_tabela_pesquisas_satisfacao():
     conn.close()
 
 
-def buscar_pesquisa_satisfacao(chamado_id):
+def buscar_pesquisa_satisfacao(chamado_id, executor_id):
+    _exigir_acesso_chamado(
+        chamado_id, executor_id, "chamados.visualizar_proprios", "chamados.visualizar_fila",
+    )
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("SELECT * FROM pesquisas_satisfacao WHERE chamado_id = %s", (chamado_id,))
@@ -1691,9 +2013,35 @@ def buscar_pesquisa_satisfacao(chamado_id):
     return resultado
 
 
+def listar_pesquisas_satisfacao(executor_id, limite=200, pagina=0):
+    exigir_permissao(executor_id, "relatorios.visualizar")
+    conn = conectar(); cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""SELECT id, chamado_id, nota, respondido_em
+                          FROM pesquisas_satisfacao ORDER BY respondido_em DESC LIMIT %s OFFSET %s""",
+                       (max(1, min(int(limite), 200)), max(0, int(pagina)) * max(1, min(int(limite), 200))))
+        return cursor.fetchall()
+    finally:
+        cursor.close(); conn.close()
+
+
 def salvar_pesquisa_satisfacao(chamado_id, nota, comentario, autor_id=None):
+    exigir_permissao(autor_id, "chamados.confirmar_resolucao")
+    if nota not in {1, 2, 3, 4, 5}:
+        raise ValueError("A nota da pesquisa deve estar entre 1 e 5.")
+    comentario = (comentario or "").strip() or None
+    if comentario and len(comentario) > 2000:
+        raise ValueError("O comentário da pesquisa pode ter no máximo 2.000 caracteres.")
     conn = conectar()
     cursor = conn.cursor()
+    cursor.execute(
+        "SELECT usuario_id, status FROM chamados WHERE id = %s", (chamado_id,)
+    )
+    chamado = cursor.fetchone()
+    if not chamado or chamado[0] != autor_id or chamado[1] != "Fechado":
+        cursor.close()
+        conn.close()
+        raise PermissionError("Somente o solicitante pode avaliar um chamado fechado.")
     cursor.execute(
         "INSERT INTO pesquisas_satisfacao (chamado_id, nota, comentario) VALUES (%s, %s, %s)",
         (chamado_id, nota, comentario),
@@ -1713,6 +2061,10 @@ def criar_tabela_atendimentos_ia():
             usuario_id INT NULL,
             chamado_id INT NULL,
             resultado VARCHAR(30) NOT NULL DEFAULT 'Pendente',
+            metadados JSON NULL,
+            feedback_utilidade TINYINT NULL,
+            feedback_comentario TEXT NULL,
+            avaliado_em DATETIME NULL,
             criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             respondido_em DATETIME NULL,
             CONSTRAINT fk_atendimentos_ia_usuario FOREIGN KEY (usuario_id)
@@ -1735,17 +2087,27 @@ def migrar_tabela_atendimentos_ia():
             cursor.execute(f"ALTER TABLE atendimentos_ia DROP COLUMN {coluna_excedente}")
             conn.commit()
             logger.info("Minimização aplicada: coluna sem leitor removida de atendimentos_ia: %s", coluna_excedente)
+    for nome_coluna, tipo in {
+        "metadados": "JSON NULL",
+        "feedback_utilidade": "TINYINT NULL",
+        "feedback_comentario": "TEXT NULL",
+        "avaliado_em": "DATETIME NULL",
+    }.items():
+        if not _coluna_existe(cursor, "atendimentos_ia", nome_coluna):
+            cursor.execute(f"ALTER TABLE atendimentos_ia ADD COLUMN {nome_coluna} {tipo}")
+            conn.commit()
+            logger.info("Migração aplicada: coluna %s adicionada em atendimentos_ia.", nome_coluna)
     cursor.close()
     conn.close()
 
 
-def salvar_atendimento_ia(usuario_id):
+def salvar_atendimento_ia(usuario_id, metadados=None):
     exigir_permissao(usuario_id, "ia.utilizar")
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO atendimentos_ia (usuario_id) VALUES (%s)",
-        (usuario_id,),
+        "INSERT INTO atendimentos_ia (usuario_id, metadados) VALUES (%s, %s)",
+        (usuario_id, json.dumps(metadados or {}, ensure_ascii=False)),
     )
     atendimento_id = cursor.lastrowid
     _registrar_auditoria(cursor, usuario_id, "ORIENTACAO_IA_APRESENTADA", "atendimento_ia", atendimento_id)
@@ -1765,15 +2127,16 @@ def registrar_resultado_atendimento_ia(atendimento_id, resultado, chamado_id=Non
     cursor.execute(
         """UPDATE atendimentos_ia
            SET resultado = %s, chamado_id = %s, respondido_em = %s
-           WHERE id = %s""",
-        (resultado, chamado_id, datetime.now(), atendimento_id),
+           WHERE id = %s AND usuario_id = %s
+             AND (resultado = 'Pendente' OR (resultado = %s AND chamado_id IS NULL))""",
+        (resultado, chamado_id, agora_utc(), atendimento_id, usuario_id, resultado),
     )
     if cursor.rowcount == 0:
         cursor.close()
         conn.close()
         raise ValueError("Atendimento de IA não encontrado.")
     _registrar_auditoria(
-        cursor, None, "RESULTADO_ORIENTACAO_IA", "atendimento_ia", atendimento_id,
+        cursor, usuario_id, "RESULTADO_ORIENTACAO_IA", "atendimento_ia", atendimento_id,
         detalhes={"resultado": resultado, "chamado_id": chamado_id},
     )
     conn.commit()
@@ -1781,22 +2144,149 @@ def registrar_resultado_atendimento_ia(atendimento_id, resultado, chamado_id=Non
     conn.close()
 
 
-def listar_atendimentos_ia(limite=5000, executor_id=None):
+def registrar_feedback_atendimento_ia(atendimento_id, nota, comentario, usuario_id):
+    """Registra avaliação qualitativa, sem substituir o desfecho resolve/não resolve."""
+    exigir_permissao(usuario_id, "ia.utilizar")
+    if nota not in {1, 2, 3, 4, 5}:
+        raise ValueError("A nota da orientação deve estar entre 1 e 5.")
+    comentario = (comentario or "").strip()
+    if len(comentario) > 2000:
+        raise ValueError("O comentário excede o limite de 2000 caracteres.")
+    conn = conectar(); cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """UPDATE atendimentos_ia SET feedback_utilidade = %s, feedback_comentario = %s,
+               avaliado_em = %s WHERE id = %s AND usuario_id = %s""",
+        (nota, comentario or None, agora_utc(), atendimento_id, usuario_id),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError("Atendimento de IA não encontrado.")
+        _registrar_auditoria(cursor, usuario_id, "FEEDBACK_ORIENTACAO_IA", "atendimento_ia", atendimento_id, detalhes={"nota": nota})
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+    finally:
+        cursor.close(); conn.close()
+
+
+def listar_atendimentos_ia(limite=200, pagina=0, executor_id=None):
     """Retorna dados agregáveis das orientações da IA para os relatórios administrativos."""
     exigir_permissao(executor_id, "relatorios.visualizar")
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
-        """SELECT id, usuario_id, chamado_id, resultado, criado_em, respondido_em
+        """SELECT id, usuario_id, chamado_id, resultado, metadados, feedback_utilidade,
+                  feedback_comentario, criado_em, respondido_em, avaliado_em
            FROM atendimentos_ia
            ORDER BY criado_em DESC
-           LIMIT %s""",
-        (limite,),
+           LIMIT %s OFFSET %s""",
+        (max(1, min(int(limite), 200)), max(0, int(pagina)) * max(1, min(int(limite), 200))),
     )
     resultados = cursor.fetchall()
     cursor.close()
     conn.close()
     return resultados
+
+
+def criar_tabela_casos_avaliacao_ia():
+    """Conjunto de referência anonimizado para medir a classificação, não para treinar o modelo."""
+    conn = conectar(); cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS casos_avaliacao_ia (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            identificador VARCHAR(100) NOT NULL UNIQUE,
+            titulo TEXT NOT NULL,
+            descricao TEXT NOT NULL,
+            categoria_esperada VARCHAR(100) NOT NULL,
+            urgencia_esperada VARCHAR(50) NOT NULL,
+            equipe_esperada VARCHAR(100) NOT NULL,
+            ativo BOOLEAN NOT NULL DEFAULT TRUE,
+            criado_por INT NULL,
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT fk_casos_avaliacao_criador FOREIGN KEY (criado_por)
+                REFERENCES usuarios(id) ON DELETE SET NULL
+        )
+    """)
+    conn.commit(); cursor.close(); conn.close()
+
+
+def criar_tabela_execucoes_avaliacao_ia():
+    conn = conectar(); cursor = conn.cursor()
+    cursor.execute("""CREATE TABLE IF NOT EXISTS execucoes_avaliacao_ia (
+        id INT AUTO_INCREMENT PRIMARY KEY, executor_id INT NULL, resultado JSON NOT NULL,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_execucoes_avaliacao_usuario FOREIGN KEY (executor_id) REFERENCES usuarios(id) ON DELETE SET NULL
+    )""")
+    conn.commit(); cursor.close(); conn.close()
+
+
+def registrar_execucao_avaliacao_ia(resultado, executor_id):
+    exigir_permissao(executor_id, "relatorios.visualizar")
+    conn = conectar(); cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO execucoes_avaliacao_ia (executor_id, resultado) VALUES (%s, %s)",
+                       (executor_id, json.dumps(resultado, ensure_ascii=False)))
+        _registrar_auditoria(cursor, executor_id, "AVALIACAO_IA_EXECUTADA", "execucoes_avaliacao_ia", cursor.lastrowid)
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+    finally:
+        cursor.close(); conn.close()
+
+
+def cadastrar_caso_avaliacao_ia(identificador, titulo, descricao, categoria, urgencia, equipe, autor_id):
+    """Insere somente casos já anonimizados e revisados pelo administrador."""
+    exigir_permissao(autor_id, "relatorios.visualizar")
+    identificador = (identificador or "").strip()
+    titulo = (titulo or "").strip(); descricao = (descricao or "").strip()
+    if not identificador or not titulo or not descricao:
+        raise ValueError("Identificador, título e descrição anonimizados são obrigatórios.")
+    if categoria not in CATEGORIAS_VALIDAS or urgencia not in URGENCIAS_VALIDAS or equipe not in EQUIPES_VALIDAS:
+        raise ValueError("Classificação esperada inválida.")
+    conn = conectar(); cursor = conn.cursor()
+    try:
+        cursor.execute("""INSERT INTO casos_avaliacao_ia
+            (identificador, titulo, descricao, categoria_esperada, urgencia_esperada, equipe_esperada, criado_por)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (identificador, titulo, descricao, categoria, urgencia, equipe, autor_id))
+        _registrar_auditoria(cursor, autor_id, "CASO_AVALIACAO_IA_CRIADO", "casos_avaliacao_ia", cursor.lastrowid)
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+    finally:
+        cursor.close(); conn.close()
+
+
+def listar_casos_avaliacao_ia(executor_id):
+    exigir_permissao(executor_id, "relatorios.visualizar")
+    conn = conectar(); cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""SELECT identificador, titulo, descricao, categoria_esperada,
+            urgencia_esperada, equipe_esperada FROM casos_avaliacao_ia WHERE ativo = TRUE ORDER BY id""")
+        return cursor.fetchall()
+    finally:
+        cursor.close(); conn.close()
+
+
+def relatorio_qualidade_ia(executor_id):
+    """Mede contra classificação final humana; confiança textual não participa da métrica."""
+    exigir_permissao(executor_id, "relatorios.visualizar")
+    conn = conectar(); cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""SELECT
+            COUNT(*) AS total,
+            SUM(categoria_ia IS NOT NULL AND categoria_ia = categoria_final) AS categoria_corretos,
+            SUM(urgencia_ia IS NOT NULL AND urgencia_ia = urgencia_final) AS urgencia_corretos,
+            SUM(equipe_ia IS NOT NULL AND equipe_ia = equipe_final) AS equipe_corretos
+            FROM chamados WHERE categoria_final IS NOT NULL""")
+        classificacao = cursor.fetchone()
+        cursor.execute("""SELECT COUNT(*) AS total_feedback, AVG(feedback_utilidade) AS nota_media,
+            SUM(resultado = 'Resolvido') AS resolvidos, SUM(resultado = 'Nao resolvido') AS nao_resolvidos
+            FROM atendimentos_ia WHERE feedback_utilidade IS NOT NULL OR resultado <> 'Pendente'""")
+        orientacoes = cursor.fetchone()
+        return {"classificacao": classificacao, "orientacoes": orientacoes}
+    finally:
+        cursor.close(); conn.close()
 
 
 def normalizar_cpf(cpf):
@@ -1955,7 +2445,7 @@ def buscar_usuario_por_email(email):
     return resultado
 
 
-def listar_usuarios(executor_id=None, para_relatorio=False):
+def listar_usuarios(executor_id=None, para_relatorio=False, limite=200, pagina=0):
     if not (para_relatorio and usuario_tem_permissao(executor_id, "relatorios.visualizar")):
         exigir_permissao(executor_id, "usuarios.visualizar")
     conn = conectar()
@@ -1968,7 +2458,8 @@ def listar_usuarios(executor_id=None, para_relatorio=False):
            FROM usuarios u
            LEFT JOIN perfis p ON p.id = u.perfil_id
            LEFT JOIN departamentos d ON d.id = u.departamento_id
-           ORDER BY u.criado_em DESC"""
+           ORDER BY u.criado_em DESC LIMIT %s OFFSET %s""",
+        (max(1, min(int(limite), 200)), max(0, int(pagina)) * max(1, min(int(limite), 200))),
     )
     resultados = cursor.fetchall()
     cursor.close()
@@ -1976,7 +2467,9 @@ def listar_usuarios(executor_id=None, para_relatorio=False):
     return resultados
 
 
-def buscar_usuario_por_id(usuario_id):
+def buscar_usuario_por_id(usuario_id, executor_id=None):
+    if executor_id != usuario_id:
+        exigir_permissao(executor_id, "usuarios.visualizar")
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
@@ -1991,8 +2484,9 @@ def buscar_usuario_por_id(usuario_id):
     return resultado
 
 
-def buscar_titular_por_identificador(identificador):
+def buscar_titular_por_identificador(identificador, executor_id=None):
     """Localiza titular por e-mail ou por CPF válido, sem recuperar o número completo."""
+    exigir_permissao(executor_id, "privacidade.gerenciar")
     valor = (identificador or "").strip()
     if not valor:
         return None, "Informe um e-mail ou CPF."
@@ -2101,7 +2595,7 @@ def exportar_dados_titular(usuario_id, autor_id=None):
             anexos_metadados.append(metadado)
 
         dados = {
-            "gerado_em": datetime.now(),
+            "gerado_em": agora_utc(),
             "escopo": "Dados associados ao titular como solicitante, autor ou analista; chamados atendidos por ele são limitados a metadados para não expor dados de terceiros.",
             "conta": conta,
             "chamados_solicitados": chamados_solicitados,
@@ -2205,7 +2699,7 @@ def anonimizar_titular(usuario_id, autor_id=None):
                    totp_secret = NULL, senha_deve_ser_redefinida = TRUE,
                    conta_anonimizada_em = %s
                WHERE id = %s""",
-            (f"anonimo-{usuario_id}@local.invalid", datetime.now(), usuario_id),
+            (f"anonimo-{usuario_id}@local.invalid", agora_utc(), usuario_id),
         )
         _registrar_auditoria(
             cursor, autor_id, "DADOS_TITULAR_ANONIMIZADOS", "usuario", usuario_id,
@@ -2329,17 +2823,72 @@ def excluir_usuario(usuario_id, autor_id=None):
         conn.close()
 
 
-def atualizar_senha(usuario_id, novo_hash_senha, autor_id=None):
+def atualizar_senha(usuario_id, novo_hash_senha, autor_id):
+    """Altera senha por ação administrativa autorizada.
+
+    Redefinições pelo próprio titular devem usar redefinir_senha_com_codigo(), que
+    consome o código temporário na mesma transação.
+    """
+    exigir_permissao(autor_id, "usuarios.gerenciar")
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE usuarios SET senha_hash = %s, senha_deve_ser_redefinida = FALSE WHERE id = %s",
         (novo_hash_senha, usuario_id),
     )
-    _registrar_auditoria(cursor, autor_id or usuario_id, "SENHA_ALTERADA", "usuario", usuario_id)
+    _registrar_auditoria(cursor, autor_id, "SENHA_ALTERADA", "usuario", usuario_id)
     conn.commit()
     cursor.close()
     conn.close()
+
+
+def redefinir_senha_com_codigo(usuario_id, codigo, novo_hash_senha):
+    """Consome um código de recuperação válido e redefine a senha atomicamente."""
+    if not codigo or not novo_hash_senha:
+        raise ValueError("Código e nova senha são obrigatórios.")
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            """SELECT id, codigo_hash, tentativas
+               FROM codigos_verificacao
+               WHERE usuario_id = %s AND tipo = 'reset_senha' AND usado = FALSE
+                 AND expira_em > NOW()
+               ORDER BY criado_em DESC LIMIT 1 FOR UPDATE""",
+            (usuario_id,),
+        )
+        registro = cursor.fetchone()
+        if not registro or registro["tentativas"] >= MAX_TENTATIVAS_CODIGO:
+            raise ValueError("Código inválido ou expirado.")
+
+        codigo_valido = bool(registro["codigo_hash"]) and bcrypt.checkpw(
+            codigo.encode("utf-8"), registro["codigo_hash"].encode("utf-8"),
+        )
+        if not codigo_valido:
+            tentativas = registro["tentativas"] + 1
+            cursor.execute(
+                "UPDATE codigos_verificacao SET tentativas = %s, usado = %s WHERE id = %s",
+                (tentativas, tentativas >= MAX_TENTATIVAS_CODIGO, registro["id"]),
+            )
+            _registrar_auditoria(
+                cursor, usuario_id, "RECUPERACAO_SENHA_FALHOU", "sessao", resultado="FALHA",
+            )
+            conn.commit()
+            raise ValueError("Código inválido ou expirado.")
+
+        cursor.execute(
+            "UPDATE usuarios SET senha_hash = %s, senha_deve_ser_redefinida = FALSE WHERE id = %s",
+            (novo_hash_senha, usuario_id),
+        )
+        cursor.execute("UPDATE codigos_verificacao SET usado = TRUE WHERE usuario_id = %s AND tipo = 'reset_senha'", (usuario_id,))
+        _registrar_auditoria(cursor, usuario_id, "SENHA_REDEFINIDA", "usuario", usuario_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def salvar_totp_secret(usuario_id, secret, autor_id=None):
@@ -2361,8 +2910,9 @@ def criar_tabela_codigos():
         CREATE TABLE IF NOT EXISTS codigos_verificacao (
             id INT AUTO_INCREMENT PRIMARY KEY,
             usuario_id INT NOT NULL,
-            codigo VARCHAR(10) NOT NULL,
+            codigo_hash VARCHAR(255) NOT NULL,
             tipo VARCHAR(30) NOT NULL,
+            tentativas SMALLINT NOT NULL DEFAULT 0,
             criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             expira_em TIMESTAMP NOT NULL,
             usado BOOLEAN DEFAULT FALSE,
@@ -2375,13 +2925,38 @@ def criar_tabela_codigos():
     logger.debug("Tabela de códigos de verificação verificada.")
 
 
-def salvar_codigo_verificacao(usuario_id, codigo, tipo, validade_minutos=10):
+def migrar_tabela_codigos():
+    """Migra códigos legados para hash e invalida códigos emitidos em texto puro."""
     conn = conectar()
     cursor = conn.cursor()
+    try:
+        if not _coluna_existe(cursor, "codigos_verificacao", "codigo_hash"):
+            cursor.execute("ALTER TABLE codigos_verificacao ADD COLUMN codigo_hash VARCHAR(255) NULL")
+        if not _coluna_existe(cursor, "codigos_verificacao", "tentativas"):
+            cursor.execute("ALTER TABLE codigos_verificacao ADD COLUMN tentativas SMALLINT NOT NULL DEFAULT 0")
+        if _coluna_existe(cursor, "codigos_verificacao", "codigo"):
+            cursor.execute("UPDATE codigos_verificacao SET usado = TRUE WHERE codigo_hash IS NULL AND usado = FALSE")
+            cursor.execute("ALTER TABLE codigos_verificacao MODIFY COLUMN codigo VARCHAR(10) NULL")
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def salvar_codigo_verificacao(usuario_id, codigo, tipo, validade_minutos=10):
+    if tipo not in {"login_2fa", "reset_senha"}:
+        raise ValueError("Tipo de código de verificação inválido.")
+    conn = conectar()
+    cursor = conn.cursor()
+    codigo_hash = bcrypt.hashpw(codigo.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
     cursor.execute(
-        """INSERT INTO codigos_verificacao (usuario_id, codigo, tipo, expira_em)
+        "UPDATE codigos_verificacao SET usado = TRUE WHERE usuario_id = %s AND tipo = %s AND usado = FALSE",
+        (usuario_id, tipo),
+    )
+    cursor.execute(
+        """INSERT INTO codigos_verificacao (usuario_id, codigo_hash, tipo, expira_em)
            VALUES (%s, %s, %s, NOW() + INTERVAL %s MINUTE)""",
-        (usuario_id, codigo, tipo, validade_minutos),
+        (usuario_id, codigo_hash, tipo, validade_minutos),
     )
     conn.commit()
     cursor.close()
@@ -2392,21 +2967,45 @@ def verificar_codigo(usuario_id, codigo, tipo):
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
-        """SELECT * FROM codigos_verificacao
-           WHERE usuario_id = %s AND codigo = %s AND tipo = %s
-             AND usado = FALSE AND expira_em > NOW()
-           ORDER BY criado_em DESC LIMIT 1""",
-        (usuario_id, codigo, tipo),
+        """SELECT id, codigo_hash, tentativas FROM codigos_verificacao
+           WHERE usuario_id = %s AND tipo = %s AND usado = FALSE AND expira_em > NOW()
+           ORDER BY criado_em DESC LIMIT 1 FOR UPDATE""",
+        (usuario_id, tipo),
     )
     resultado = cursor.fetchone()
-    if resultado:
+    valido = resultado and resultado["tentativas"] < MAX_TENTATIVAS_CODIGO and bool(resultado["codigo_hash"]) and bcrypt.checkpw(
+        codigo.encode("utf-8"), resultado["codigo_hash"].encode("utf-8"),
+    )
+    if valido:
         cursor.execute(
             "UPDATE codigos_verificacao SET usado = TRUE WHERE id = %s", (resultado["id"],)
         )
-        conn.commit()
+    elif resultado:
+        tentativas = resultado["tentativas"] + 1
+        cursor.execute(
+            "UPDATE codigos_verificacao SET tentativas = %s, usado = %s WHERE id = %s",
+            (tentativas, tentativas >= MAX_TENTATIVAS_CODIGO, resultado["id"]),
+        )
+    conn.commit()
     cursor.close()
     conn.close()
-    return resultado is not None
+    return bool(valido)
+
+
+def expurgar_codigos_expirados(retencao_dias=30):
+    """Expurgo operacional explícito; execute por agendador, nunca no startup."""
+    retencao_dias = max(1, min(int(retencao_dias), 365))
+    conn = conectar(); cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "DELETE FROM codigos_verificacao WHERE expira_em < UTC_TIMESTAMP() - INTERVAL %s DAY",
+            (retencao_dias,),
+        )
+        removidos = cursor.rowcount
+        conn.commit()
+        return removidos
+    finally:
+        cursor.close(); conn.close()
 
 
 if __name__ == "__main__":
@@ -2415,11 +3014,14 @@ if __name__ == "__main__":
     criar_tabela_usuarios()
     migrar_tabela_usuarios()
     migrar_usuarios_rbac()
+    criar_tabela_configuracao_sla()
     criar_tabela_chamados()
     migrar_tabela_chamados()
+    criar_tabela_historico_chamados()
     criar_tabela_base_casos_ia()
     migrar_tabela_base_casos_ia()
     criar_tabela_codigos()
+    migrar_tabela_codigos()
     criar_tabela_mensagens()
     criar_tabela_anexos()
     criar_tabela_pesquisas_satisfacao()

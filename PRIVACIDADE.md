@@ -1,20 +1,22 @@
 # Aviso de Privacidade — Sistema Inteligente de Chamados
 
-**Versão 1.2.0 — publicada em 07/10/2026**
+**Versão 1.3.0 — publicada em 13/10/2026**
 
 Este aviso explica como os dados pessoais são tratados no Sistema Inteligente de
 Chamados, em conformidade com a Lei nº 13.709, de 14 de agosto de 2018 — Lei Geral
 de Proteção de Dados Pessoais (LGPD).
 
-> Antes da produção, substitua os campos entre colchetes pelas informações da
-> organização e valide este aviso com o encarregado/DPO ou assessoria jurídica.
+> Antes da produção, configure os dados reais de controlador e DPO no ambiente e
+> valide este aviso com o encarregado/DPO ou assessoria jurídica. Não é seguro inventar
+> esses dados em um projeto acadêmico.
 
 ## Controlador e canal de contato
 
-**Controlador:** [nome da organização], responsável pelas decisões sobre o tratamento
-dos dados pessoais no sistema.
+**Controlador:** a organização operadora configurada como `ORGANIZACAO_CONTROLADORA`
+(CNPJ `CNPJ_CONTROLADOR`), responsável pelas decisões sobre o tratamento dos dados.
 
-**Encarregado/DPO ou canal de privacidade:** [e-mail ou canal de contato].
+**Encarregado/DPO ou canal de privacidade:** `DPO_NOME`, pelo canal
+`CANAL_PRIVACIDADE` divulgado ao titular.
 
 ## Dados pessoais tratados
 
@@ -41,17 +43,17 @@ solicitações de suporte, comunicar-se sobre os chamados, proteger o sistema, p
 fraudes e incidentes, manter auditoria técnica e cumprir obrigações legais ou
 regulatórias aplicáveis.
 
-O controlador deve definir e documentar a base legal adequada para cada operação de
-tratamento, nos termos dos arts. 7º e, quando aplicável, 11 da LGPD. Conforme o caso,
-isso pode incluir execução de contrato ou de procedimentos relacionados ao contrato,
-cumprimento de obrigação legal ou regulatória, legítimo interesse com avaliação
-adequada, ou consentimento. Quando o consentimento for a base legal aplicável, ele será
-livre, informado, inequívoco e poderá ser revogado pelo titular.
+O controlador deve registrar e validar com o DPO a base legal de cada operação:
 
-O aceite exibido no sistema registra que a pessoa usuária leu este aviso e aceita
-fornecer os dados pessoais necessários ao uso do serviço. Esse registro não substitui a
-definição da base legal aplicável pelo controlador nem amplia as finalidades descritas
-neste aviso.
+| Operação | Base legal a validar | Responsável |
+| --- | --- | --- |
+| Conta, autenticação e atendimento | execução de contrato/procedimentos preliminares (art. 7º, V) | Operações de suporte |
+| Segurança, prevenção a fraude e logs | legítimo interesse com LIA documentado (art. 7º, IX) | Segurança da informação |
+| Obrigações regulatórias | obrigação legal/regulatória (art. 7º, II) | Jurídico/Compliance |
+| IA e conhecimento interno | finalidade compatível e avaliação de impacto | DPO e responsável de IA |
+
+O aceite exibido no sistema registra ciência do aviso; ele não é uma base genérica para
+tratamentos que se sustentam em contrato, obrigação legal ou legítimo interesse.
 
 ## Compartilhamento e uso de tecnologia
 
@@ -62,15 +64,22 @@ controlador e com medidas de segurança apropriadas.
 
 O sistema pode utilizar recursos de inteligência artificial para apoiar a orientação,
 classificação e o atendimento de chamados. A inclusão de um caso na base interna de
-conhecimento é uma decisão do analista responsável, conforme as permissões concedidas
-pela organização, e ocorre apenas após a remoção de identificadores diretos. O
-controlador deve manter documentada a base legal aplicável a esse tratamento.
+conhecimento exige revisão humana e aprovação explícita. A anonimização por regex é
+apenas uma barreira inicial e não garante a remoção de dado pessoal em texto livre; o
+revisor deve remover identificadores diretos, indiretos, segredos e contexto sensível.
 
 ## Retenção e segurança
 
 Os dados são mantidos apenas pelo período necessário às finalidades descritas, à
-segurança, à auditoria e às obrigações legais aplicáveis. A organização deve definir e
-documentar sua tabela de retenção antes da produção.
+segurança, à auditoria e às obrigações legais aplicáveis. A tabela de retenção formal é:
+
+| Categoria | Prazo padrão | Ação ao término |
+| --- | --- | --- |
+| Códigos temporários | 30 dias após expiração/uso | expurgo agendado e auditável |
+| Chamados, mensagens e anexos | 5 anos após fechamento | anonimização ou eliminação autorizada |
+| Casos e atendimentos de IA | 2 anos | eliminação ou nova revisão humana |
+| Logs e auditoria | 5 anos | arquivamento protegido ou eliminação autorizada |
+| Arquivo de exportação LGPD | 7 dias | remoção do local temporário |
 
 São adotados controles de acesso por perfil, proteção de credenciais, registros de
 auditoria e recursos de anonimização. A organização também deve proteger o banco de

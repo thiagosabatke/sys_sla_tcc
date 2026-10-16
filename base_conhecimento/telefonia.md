@@ -1,4 +1,5 @@
 ---
+publicado: true
 titulo: Telefonia, ramal e softphone
 categoria: Rede
 resumo: Como abrir chamados sobre ramal sem tom, softphone que não autentica, chamadas que não completam, áudio com eco ou falha e alteração de ramal/fila.

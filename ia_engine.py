@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+import hashlib
+import re
 import ollama
 from dotenv import load_dotenv
 from rag import buscar_contexto
@@ -12,6 +14,24 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 MODELO = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+VERSAO_PROMPT_CLASSIFICACAO = "classificacao-v2"
+VERSAO_PROMPT_COLETA = "coleta-v2"
+
+_CATEGORIAS = {"Acesso", "Software", "Hardware", "Rede", "Outros"}
+_URGENCIAS = {"Baixa", "Media", "Alta", "Critica"}
+_EQUIPES_POR_CATEGORIA = {
+    "Acesso": "Suporte", "Software": "Software", "Hardware": "Hardware",
+    "Rede": "Redes", "Outros": "Suporte",
+}
+_SLA_POR_URGENCIA = {
+    "Critica": ("15 minutos", "4 horas"), "Alta": ("1 hora", "8 horas"),
+    "Media": ("4 horas", "24 horas"), "Baixa": ("8 horas", "72 horas"),
+}
+_TERMOS_ALTO_RISCO = (
+    "senha", "credencial", "token", "mfa", "2fa", "permiss", "administrador",
+    "sudo", "firewall", "vpn", "chave de recuperação", "formatar", "excluir",
+    "apagar", "revogar acesso", "alterar segurança",
+)
 
 
 def _montar_exemplos_few_shot(casos):
@@ -74,6 +94,66 @@ Resposta: {"categoria": "Hardware", "urgencia": "Alta", "tempo_sla_resposta": "1
 """
 
 
+def _limpar_texto(valor, limite, padrao):
+    valor = re.sub(r"\s+", " ", str(valor or "")).strip()
+    return valor[:limite] if valor else padrao[:limite]
+
+
+def _fontes_publicas(trechos):
+    """Não revela nomes/conteúdo de casos internos ao solicitante."""
+    return [
+        {"titulo": t["titulo"], "tipo": "artigo oficial", "similaridade": round(t["similaridade"], 2)}
+        for t in trechos if t.get("tipo") == "procedimento_oficial"
+    ]
+
+
+def _metadados_resultado(prompt, trechos, versao):
+    return {
+        "modelo": MODELO,
+        "versao_prompt": versao,
+        "hash_prompt": hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16],
+        "fontes": _fontes_publicas(trechos),
+        "base_consultada": [
+            {"referencia": t["arquivo"], "tipo": t.get("tipo"), "similaridade": round(t["similaridade"], 2)}
+            for t in trechos
+        ],
+        "casos_internos_consultados": sum(t.get("tipo") == "caso_validado" for t in trechos),
+    }
+
+
+def validar_classificacao(resultado, titulo_original, descricao_original):
+    """Valida cada campo do modelo e aplica fallback determinístico por campo."""
+    resultado = resultado if isinstance(resultado, dict) else {}
+    corrigidos = []
+    categoria = resultado.get("categoria")
+    if categoria not in _CATEGORIAS:
+        categoria = "Outros"; corrigidos.append("categoria")
+    urgencia = resultado.get("urgencia")
+    if urgencia not in _URGENCIAS:
+        urgencia = "Media"; corrigidos.append("urgencia")
+    equipe = resultado.get("equipe_destino")
+    if equipe not in set(_EQUIPES_POR_CATEGORIA.values()):
+        equipe = _EQUIPES_POR_CATEGORIA[categoria]; corrigidos.append("equipe_destino")
+    titulo = _limpar_texto(resultado.get("titulo_resumido"), 255, titulo_original)
+    if titulo == _limpar_texto(titulo_original, 255, titulo_original) and not resultado.get("titulo_resumido"):
+        corrigidos.append("titulo_resumido")
+    descricao = _limpar_texto(resultado.get("descricao_padronizada"), 5000, descricao_original)
+    if descricao == _limpar_texto(descricao_original, 5000, descricao_original) and not resultado.get("descricao_padronizada"):
+        corrigidos.append("descricao_padronizada")
+    confiabilidade = resultado.get("confiabilidade")
+    if confiabilidade not in {"Alta", "Media", "Baixa"}:
+        confiabilidade = "Baixa"; corrigidos.append("confiabilidade")
+    prazo_resposta, prazo_resolucao = _SLA_POR_URGENCIA[urgencia]
+    return {
+        "categoria": categoria, "urgencia": urgencia, "equipe_destino": equipe,
+        "titulo_resumido": titulo, "descricao_padronizada": descricao,
+        "confiabilidade": confiabilidade,
+        # Não se usa a autodeclaração para medir qualidade: ela é apenas contexto operacional.
+        "tempo_sla_resposta": prazo_resposta, "tempo_sla_resolucao": prazo_resolucao,
+        "campos_corrigidos": corrigidos,
+    }
+
+
 def classificar_chamado(titulo, descricao):
     trechos = buscar_contexto(f"{titulo} {descricao}", top_k=2)
     contexto = "\n\n---\n\n".join(t["conteudo"] for t in trechos)
@@ -114,37 +194,36 @@ Classifique este chamado."""
     except json.JSONDecodeError:
 
         logger.warning("Classificação da IA retornou JSON inválido; usando valores padrão.")
-        resultado = {
-            "categoria": "Outros",
-            "urgencia": "Media",
-            "tempo_sla_resposta": "4 horas",
-            "tempo_sla_resolucao": "24 horas",
-            "equipe_destino": "Suporte",
-            "titulo_resumido": titulo[:50],
-            "descricao_padronizada": descricao,
-            "confiabilidade": "Baixa",
-            "erro_parsing": texto_resposta,
-        }
+        resultado = {}
 
-    resultado["arquivos_consultados"] = [t["arquivo"] for t in trechos]
+    validado = validar_classificacao(resultado, titulo, descricao)
+    if validado["campos_corrigidos"]:
+        logger.warning("Campos inválidos/incompletos corrigidos na classificação: %s", ", ".join(validado["campos_corrigidos"]))
+    validado["arquivos_consultados"] = [t["arquivo"] for t in trechos]
+    validado["metadados_ia"] = _metadados_resultado(PROMPT_SISTEMA + prompt_usuario, trechos + casos_semelhantes, VERSAO_PROMPT_CLASSIFICACAO)
+    return validado
 
-    campos_padrao = {
-        "categoria": "Outros",
-        "urgencia": "Media",
-        "tempo_sla_resposta": "4 horas",
-        "tempo_sla_resolucao": "24 horas",
-        "equipe_destino": "Suporte",
-        "titulo_resumido": titulo[:50],
-        "descricao_padronizada": descricao,
-        "confiabilidade": "Baixa",
+
+def avaliar_classificador(casos):
+    """Executa benchmark manual contra rótulos humanos anonimizados."""
+    resultados = []
+    for caso in casos:
+        previsto = classificar_chamado(caso["titulo"], caso["descricao"])
+        resultados.append({
+            "identificador": caso["identificador"],
+            "categoria": previsto["categoria"] == caso["categoria_esperada"],
+            "urgencia": previsto["urgencia"] == caso["urgencia_esperada"],
+            "equipe": previsto["equipe_destino"] == caso["equipe_esperada"],
+            "metadados_ia": previsto["metadados_ia"],
+        })
+    total = len(resultados)
+    return {
+        "total": total,
+        "categoria": sum(r["categoria"] for r in resultados) / total if total else None,
+        "urgencia": sum(r["urgencia"] for r in resultados) / total if total else None,
+        "equipe": sum(r["equipe"] for r in resultados) / total if total else None,
+        "resultados": resultados,
     }
-    campos_faltando = [c for c in campos_padrao if c not in resultado]
-    if campos_faltando:
-        logger.warning("Classificação da IA incompleta (%s); aplicando valores padrão.", ", ".join(campos_faltando))
-    for campo, valor_padrao in campos_padrao.items():
-        resultado.setdefault(campo, valor_padrao)
-
-    return resultado
 
 
 PROMPT_COLETA_TEMPLATE = """Você é um assistente de suporte técnico de TI,
@@ -250,6 +329,8 @@ def _intencao_por_fallback(mensagem):
 
 
 def identificar_intencao(mensagem):
+    if _conteudo_alto_risco(mensagem):
+        return "problema"
     resposta = ollama.chat(
         model=MODELO,
         messages=[
@@ -279,13 +360,37 @@ def responder_duvida(mensagem):
         ],
     )
     texto = resposta["message"]["content"].strip()
-    return texto or "Não consegui elaborar uma orientação agora. Pode reformular sua dúvida?"
+    return {
+        "mensagem": texto or "Não consegui elaborar uma orientação agora. Pode reformular sua dúvida?",
+        "fontes": _fontes_publicas(trechos),
+        "metadados_ia": _metadados_resultado(PROMPT_RESPOSTA_DUVIDA + mensagem, trechos, "duvida-v2"),
+    }
+
+
+def _conteudo_alto_risco(texto):
+    texto = (texto or "").lower()
+    return any(termo in texto for termo in _TERMOS_ALTO_RISCO)
+
+
+def _resultado_seguro_para_risco(trechos, historico):
+    return {
+        "acao": "finalizar",
+        "titulo": "Solicitação com validação de segurança",
+        "descricao": _limpar_texto(" ".join(m["content"] for m in historico if m["role"] == "user"), 5000, "Solicitação de segurança."),
+        "mensagem": "Por segurança, esta solicitação precisa de validação por um analista. Não execute comandos, redefina credenciais ou altere permissões com base nesta conversa.",
+        "fontes": _fontes_publicas(trechos),
+        "metadados_ia": _metadados_resultado("alto-risco", trechos, VERSAO_PROMPT_COLETA),
+        "restricao_seguranca": True,
+    }
 
 
 def conversar_coleta(historico):
     texto_usuario_ate_agora = " ".join(m["content"] for m in historico if m["role"] == "user")
     trechos = buscar_contexto(texto_usuario_ate_agora, top_k=1) if texto_usuario_ate_agora else []
     contexto = "\n\n---\n\n".join(t["conteudo"] for t in trechos) if trechos else "(nenhum contexto específico ainda)"
+
+    if _conteudo_alto_risco(texto_usuario_ate_agora):
+        return _resultado_seguro_para_risco(trechos, historico)
 
     prompt_sistema = PROMPT_COLETA_TEMPLATE.format(contexto=contexto)
     mensagens = [{"role": "system", "content": prompt_sistema}] + historico
@@ -308,9 +413,12 @@ def conversar_coleta(historico):
     if resultado["acao"] not in {"orientar", "perguntar", "solucionar", "finalizar"}:
         resultado["acao"] = "perguntar"
 
+    texto_coletado = " ".join(m["content"] for m in historico if m["role"] == "user")
+    if len(texto_coletado.strip()) < 12 and resultado["acao"] in {"solucionar", "finalizar"}:
+        resultado = {"acao": "perguntar", "mensagem": "Pode descrever o que acontece, em qual sistema ou equipamento e qual mensagem de erro aparece?"}
     if resultado["acao"] in {"solucionar", "finalizar"}:
-        resultado.setdefault("titulo", "Chamado sem título definido")
-        resultado.setdefault("descricao", " ".join(m["content"] for m in historico if m["role"] == "user"))
+        resultado["titulo"] = _limpar_texto(resultado.get("titulo"), 255, "Chamado sem título definido")
+        resultado["descricao"] = _limpar_texto(resultado.get("descricao"), 5000, texto_coletado)
     if resultado["acao"] == "solucionar":
         resultado.setdefault("mensagem", "Com os dados informados, encontrei uma orientação que pode resolver o problema.")
         resultado.setdefault("solucao", "Não foi possível detalhar uma solução segura. Você pode abrir um chamado para atendimento.")
@@ -319,6 +427,8 @@ def conversar_coleta(historico):
     else:
         resultado.setdefault("mensagem", "Pode detalhar um pouco mais o problema?")
 
+    resultado["fontes"] = _fontes_publicas(trechos)
+    resultado["metadados_ia"] = _metadados_resultado(prompt_sistema + texto_usuario_ate_agora, trechos, VERSAO_PROMPT_COLETA)
     return resultado
 
 

@@ -1,4 +1,5 @@
 ---
+publicado: true
 titulo: Sistemas, programas e licenças
 categoria: Software
 resumo: Como abrir chamados sobre sistema travando, erro ao abrir programa, instalação, atualização e solicitação de licença de software.
