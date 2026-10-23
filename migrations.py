@@ -25,6 +25,11 @@ TABELAS_PROTEGIDAS = (
     "codigos_verificacao", "aceites_privacidade",
 )
 
+# Enquanto o projeto estiver em desenvolvimento, a cópia das tabelas no próprio
+# banco fica desativada. Faça um backup externo antes de executar migrações em
+# ambientes que contenham dados relevantes.
+BACKUP_AUTOMATICO_HABILITADO = False
+
 
 def _agora_utc():
     return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -169,7 +174,7 @@ def executar_migracoes():
             continue
         conn = database.conectar()
         try:
-            backup = _backup_pre_migracao(conn, versao) if exige_backup else None
+            backup = _backup_pre_migracao(conn, versao) if exige_backup and BACKUP_AUTOMATICO_HABILITADO else None
         finally:
             conn.close()
         logger.warning("Aplicando migração %s (%s); backup=%s", versao, nome, backup or "não aplicável")

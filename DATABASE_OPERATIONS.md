@@ -7,15 +7,12 @@ necessárias para schema. Registre a versão, responsável, horário UTC e resul
 
 ## Backup e rollback
 
-Antes de uma migração que altera schema, o gerenciador cria cópias das tabelas
-operacionais com o prefixo registrado em `schema_migrations.backup_prefixo`. Esse é um
-backup de contingência no mesmo servidor, não substitui um dump criptografado e testado
-fora do servidor. Faça e valide também um backup lógico/gerenciado antes da janela.
+No estado atual do projeto, as migrações não criam cópias `schema_bkp_*` dentro do banco.
+Antes de executar uma migração, faça e valide um backup lógico ou gerenciado externo.
 
-Se uma migração falhar, interrompa a publicação, preserve logs e restaure o dump externo.
-Para rollback pontual, compare a cópia `schema_bkp_v<versão>_<UTC>_<tabela>` com a tabela
-atual em ambiente isolado; depois restaure dados e schema por script revisado. Não execute
-`DROP TABLE` ou renomeie tabelas de produção sem aprovação do responsável pelo banco.
+Se uma migração falhar, interrompa a publicação, preserve os logs e restaure o backup
+externo em ambiente isolado antes de aplicar qualquer correção. Não execute `DROP TABLE`
+ou renomeie tabelas de produção sem aprovação do responsável pelo banco.
 
 ## Retenção
 

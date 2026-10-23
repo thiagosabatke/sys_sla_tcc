@@ -49,6 +49,7 @@ from database import (
     criar_tabela_configuracao_sla, obter_configuracao_sla, atualizar_configuracao_sla,
     fechar_chamados_resolvidos_automaticamente,
     listar_auditoria,
+    para_horario_local,
 )
 from auth import (
     autenticar, gerar_hash_senha, gerar_codigo_numerico, gerar_totp_secret,
@@ -99,6 +100,9 @@ ICONE_SLA = {
 
 
 def injetar_css():
+    """Mantido como ponto de extensão, sem substituir o estilo nativo."""
+    return
+
     st.markdown("""
     <style>
         :root {
@@ -161,6 +165,23 @@ def injetar_css():
             font-weight: 700;
         }
         [data-testid="stSidebar"] hr { border-color: #3e5954; }
+
+        /* A barra lateral não acompanha o tema da área principal: ela mantém
+           a aparência escura em toda a navegação, inclusive nos expansores. */
+        [data-testid="stSidebar"] [data-testid="stExpander"],
+        [data-testid="stSidebar"] [data-testid="stExpander"] details,
+        [data-testid="stSidebar"] [data-testid="stExpander"] details > summary,
+        [data-testid="stSidebar"] [data-testid="stExpander"] details > summary > div {
+            background: #253342 !important;
+            border-color: #3e5954 !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stExpander"] summary,
+        [data-testid="stSidebar"] [data-testid="stExpander"] summary *,
+        [data-testid="stSidebar"] [data-testid="stExpander"] p,
+        [data-testid="stSidebar"] [data-testid="stExpander"] label,
+        [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stCaptionContainer"] {
+            color: #ffffff !important;
+        }
 
         .sidebar-brand {
             padding: 0.75rem 0.65rem 0.9rem;
@@ -350,7 +371,8 @@ def injetar_css():
     </style>
     """, unsafe_allow_html=True)
 
-    if st.session_state.get("tema_visual", "Claro") == "Escuro":
+    # Tema único da aplicação por enquanto: escuro.
+    if True:
         st.markdown("""
         <style>
             :root { --agenda-active: #176b4d; --agenda-active-text: #ffffff; --agenda-closed: #3e5954; --agenda-closed-text: #ffffff; --input-bg: #232226; --input-border: #5e9188; --input-focus: #5e9188; --input-text: #ffffff; }
@@ -374,17 +396,48 @@ def injetar_css():
             .sla-pill, .artigo-tag { background: #3e5954; color: #ffffff; }
             [data-testid="stMetric"] { border-left: 4px solid #5e9188; padding: 0.75rem; border-radius: 10px; }
             [data-testid="stExpander"], [data-testid="stExpander"] details,
+            [data-testid="stExpander"] details > summary,
+            [data-testid="stExpander"] details > summary > div,
             [data-testid="stForm"] {
                 background: #253342 !important;
                 border-color: #3e5954 !important;
+            }
+            [data-testid="stExpander"] details > summary {
+                color: #ffffff !important;
             }
             [data-testid="stForm"] {
                 padding: 1rem;
                 border-radius: 10px;
             }
             [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea,
-            [data-baseweb="select"] > div, [data-baseweb="input"] > div { background: #253342; color: #ffffff; }
+            [data-testid="stSelectbox"] [data-baseweb="select"],
+            [data-testid="stSelectbox"] [data-baseweb="select"] > div,
+            [data-testid="stSelectbox"] [data-baseweb="select"] > div > div,
+            [data-testid="stSelectbox"] [role="combobox"],
+            [data-baseweb="input"] > div {
+                background: #253342 !important;
+                color: #ffffff !important;
+                border-color: #5e9188 !important;
+            }
+            [data-testid="stSelectbox"] [data-baseweb="select"] input {
+                background: #253342 !important;
+                color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
+            }
             [data-baseweb="select"] *, [data-baseweb="input"] * { color: #ffffff !important; }
+            /* Evita que o botão de revelar senha e a seta dos selects mantenham
+               o fundo claro padrão do BaseWeb. */
+            [data-testid="stTextInput"] [data-baseweb="input"] button,
+            [data-testid="stSelectbox"] [data-baseweb="select"] button {
+                background: transparent !important;
+                border-color: transparent !important;
+                color: #ffffff !important;
+            }
+            [data-testid="stTextInput"] [data-baseweb="input"] svg,
+            [data-testid="stSelectbox"] [data-baseweb="select"] svg {
+                fill: #ffffff !important;
+                color: #ffffff !important;
+            }
             [data-testid="stVerticalBlockBorderWrapper"] label,
             [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stMarkdownContainer"] p,
             [data-testid="stVerticalBlockBorderWrapper"] h1,
@@ -615,30 +668,12 @@ def injetar_css():
 
 
 def exibir_tabela_tematica(dados):
-    """Renderiza tabelas administrativas com cores estáveis nos dois temas."""
+    """Renderiza a tabela usando o componente padrão do Streamlit."""
     tabela = dados if isinstance(dados, pd.DataFrame) else pd.DataFrame(dados)
     if tabela.empty:
         st.info("Nenhum registro encontrado.")
         return
-
-    def texto(valor):
-        try:
-            if pd.isna(valor):
-                return "—"
-        except (TypeError, ValueError):
-            pass
-        return escape(str(valor))
-
-    cabecalho = "".join(f"<th>{escape(str(coluna))}</th>" for coluna in tabela.columns)
-    linhas = "".join(
-        "<tr>" + "".join(f"<td>{texto(valor)}</td>" for valor in linha) + "</tr>"
-        for linha in tabela.itertuples(index=False, name=None)
-    )
-    st.markdown(
-        f'<div class="app-table-wrap"><table class="app-table"><thead><tr>{cabecalho}</tr>'
-        f"</thead><tbody>{linhas}</tbody></table></div>",
-        unsafe_allow_html=True,
-    )
+    st.dataframe(tabela, use_container_width=True, hide_index=True)
 
 
 CATEGORIA_COR = {
@@ -702,6 +737,53 @@ def badge_urgencia(urgencia):
 def badge_sla(texto, status_sla_texto):
     icone = ICONE_SLA.get(status_sla_texto, "•")
     return badge(f"{icone} {texto}", sla.CORES_SLA.get(status_sla_texto, "#64748b"))
+
+
+def bloco_fila(texto, cor, icone=""):
+    """Etiqueta de cor sólida usada somente nos cartões da fila de atendimento."""
+    return (
+        '<span style="display:inline-block; padding:0.28rem 0.55rem; margin:0 0.3rem 0.35rem 0; '
+        f'border-radius:0.4rem; background:{cor}; color:#ffffff; font-size:0.78rem; font-weight:600;">'
+        f'{escape(icone)} {escape(str(texto))}</span>'
+    )
+
+
+CORES_FILA_STATUS = {
+    "Novo": "#2563eb",
+    "Aberto": "#2563eb",
+    "Em Andamento": "#f97316",
+    "Em Espera": "#9333ea",
+    "Resolvido": "#16a34a",
+    "Fechado": "#15803d",
+    "Cancelado": "#64748b",
+}
+CORES_FILA_URGENCIA = {
+    "Critica": "#dc2626", "Alta": "#f97316", "Media": "#d97706", "Baixa": "#16a34a",
+}
+CORES_FILA_SLA = {
+    "Dentro do prazo": "#16a34a", "Em risco": "#f97316", "Violado": "#dc2626",
+    "Pausado": "#9333ea", "Cumprido": "#16a34a", "Não aplicável": "#64748b",
+}
+
+
+def etiquetas_fila(chamado, estado_sla):
+    """Agrupa status e urgência em blocos visuais objetivos."""
+    status = chamado.get("status") or "Não informado"
+    urgencia = chamado.get("urgencia") or "Não informada"
+    icone_status = "✅" if status in {"Resolvido", "Fechado"} else ""
+    return "".join((
+        bloco_fila(status, CORES_FILA_STATUS.get(status, "#64748b"), icone_status),
+        bloco_fila(urgencia, CORES_FILA_URGENCIA.get(urgencia, "#64748b"), ICONE_URGENCIA.get(urgencia, "")),
+    ))
+
+
+def etiquetas_sla_fila(estado_sla):
+    """Mostra resposta e resolução como blocos independentes, sem marcador de texto."""
+    def etiqueta(etapa, situacao):
+        icone = "🚨" if situacao == "Violado" else "⚠️" if situacao == "Em risco" else "⏸️" if situacao == "Pausado" else "✅" if situacao == "Cumprido" else ""
+        return bloco_fila(f"{etapa}: {situacao}", CORES_FILA_SLA.get(situacao, "#64748b"), icone)
+
+    return etiqueta("Resposta", estado_sla["resposta"]["status"]) + etiqueta("Resolução", estado_sla["resolucao"]["status"])
 
 
 def classe_card_sla(estado_sla):
@@ -787,24 +869,8 @@ def linha_do_tempo_chamado(chamado, executor_id):
 
 
 def cabecalho(titulo, subtitulo, icone="🎫"):
-    coluna_titulo, coluna_tema = st.columns([6, 1.35])
-    with coluna_titulo:
-        st.markdown(f"""
-        <div class="app-header">
-            <div>
-                <h1>{icone} {titulo}</h1>
-                <div class="sub">{subtitulo}</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    with coluna_tema:
-        st.radio(
-            "Tema da interface",
-            ["Claro", "Escuro"],
-            key="tema_visual",
-            horizontal=True,
-            label_visibility="collapsed",
-        )
+    st.title(f"{icone} {titulo}")
+    st.caption(subtitulo)
 
 
 ESTADO_INICIAL_SESSAO = {
@@ -814,7 +880,6 @@ ESTADO_INICIAL_SESSAO = {
     "admin_nav": "Usuários",
     "usuario_nav": "Central de ajuda",
     "analista_nav": "Fila ativa",
-    "tema_visual": "Claro",
     "tela_atual": "login",
     "email_recuperacao": None,
     "aceite_privacidade_validado": False,
@@ -1531,9 +1596,6 @@ def tela_analista(usuario):
     cabecalho("Central de Serviços — Analista", f"{usuario['nome']} · Gestão de Incidentes")
 
     chamados = listar_chamados(limite=200, executor_id=usuario["id"])
-    if not chamados:
-        st.info("Nenhum chamado registrado ainda.")
-        return
 
     opcoes_navegacao = ["Fila ativa", "Histórico (fechados)", "Cancelados"]
     if st.session_state.get("analista_nav") not in opcoes_navegacao:
@@ -1633,21 +1695,24 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
             st.caption("Nenhum chamado com os filtros selecionados.")
         for c in chamados_filtrados:
             selecionado = st.session_state.chamado_selecionado_analista == c["id"]
-            classe_extra = " ticket-selected" if selecionado else ""
             estado_sla = sla.status_sla(c)
-            classe_extra += classe_card_sla(estado_sla)
             responsavel = c.get("nome_analista") or "Sem atribuição"
-            st.markdown(f"""
-            <div class="card{classe_extra}">
-                <div class="card-title">#{c['id']} — {c['titulo']}</div>
-                <div class="card-meta">{badge_status(c['status'])} {badge_urgencia(c['urgencia'])}</div>
-                <div class="card-meta" style="margin-top:6px;">{linha_sla_card(estado_sla)}</div>
-                <div class="card-meta" style="margin-top:6px;">👤 {c.get('nome_usuario') or '—'} · 🧑‍💻 {responsavel}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("Selecionar", key=f"sel_{c['id']}", use_container_width=True):
-                st.session_state.chamado_selecionado_analista = c["id"]
-                st.rerun()
+            with st.container(border=True):
+                st.markdown(f"**#{c['id']} · {c['titulo']}**")
+                st.markdown(etiquetas_fila(c, estado_sla), unsafe_allow_html=True)
+                st.markdown(etiquetas_sla_fila(estado_sla), unsafe_allow_html=True)
+                st.caption(
+                    f"Solicitante: {c.get('nome_usuario') or '—'} · "
+                    f"Responsável: {responsavel}"
+                )
+                if selecionado:
+                    st.button(
+                        "Chamado selecionado", key=f"sel_{c['id']}", type="primary",
+                        use_container_width=True, disabled=True,
+                    )
+                elif st.button("Ver detalhes", key=f"sel_{c['id']}", use_container_width=True):
+                    st.session_state.chamado_selecionado_analista = c["id"]
+                    st.rerun()
 
     with detalhe_col:
         chamado_id_sel = st.session_state.chamado_selecionado_analista
@@ -1665,7 +1730,7 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
             topo_esq, topo_dir = st.columns([3, 1])
             with topo_esq:
                 st.markdown(f"#### #{chamado['id']} — {chamado['titulo']}")
-                st.markdown(f"{badge_status(chamado['status'])} {badge_urgencia(chamado['urgencia'])}", unsafe_allow_html=True)
+                st.caption(f"Status: {chamado['status']} · Urgência: {chamado['urgencia']}")
             with topo_dir:
                 analista_atribuido = chamado.get("analista_id")
                 ja_atribuido_a_mim = analista_atribuido == usuario["id"]
@@ -1687,12 +1752,10 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
 
             st.write(chamado["descricao"])
 
-            st.markdown(
-                f'<span class="sla-pill"> {chamado.get("categoria") or "—"}</span>'
-                f'<span class="sla-pill"> Equipe: {chamado.get("equipe_destino") or "—"}</span>'
-                f'<span class="sla-pill"> Confiabilidade IA: {chamado.get("confiabilidade") or "—"}</span>',
-                unsafe_allow_html=True,
-            )
+            categoria_col, equipe_col, ia_col = st.columns(3)
+            categoria_col.caption(f"Categoria: {chamado.get('categoria') or '—'}")
+            equipe_col.caption(f"Equipe: {chamado.get('equipe_destino') or '—'}")
+            ia_col.caption(f"Confiança da IA: {chamado.get('confiabilidade') or '—'}")
             bloco_sla_detalhe(chamado, sla.status_sla(chamado))
             st.caption(f"Solicitante: {chamado.get('nome_usuario') or '-'} · Aberto em {chamado.get('criado_em').strftime('%d/%m/%Y %H:%M:%S')}")
 
@@ -2000,21 +2063,8 @@ def _aba_cancelados_analista(usuario, chamados_todos):
 
 
 def _estilizar_grafico(figura, eixo):
-    """Mantém gráficos legíveis nos dois temas da aplicação."""
-    escuro = st.session_state.get("tema_visual") == "Escuro"
-    fundo = "#253342" if escuro else "#ffffff"
-    texto = "#ffffff" if escuro else "#232226"
-    grade = "#3e5954" if escuro else "#b8c9c5"
-    figura.patch.set_facecolor(fundo)
-    eixo.set_facecolor(fundo)
-    eixo.tick_params(colors=texto)
-    eixo.title.set_color(texto)
-    eixo.xaxis.label.set_color(texto)
-    eixo.yaxis.label.set_color(texto)
-    eixo.grid(axis="y", color=grade, alpha=0.45, linewidth=0.8)
-    eixo.set_axisbelow(True)
-    for spine in eixo.spines.values():
-        spine.set_color(grade)
+    """Preserva o estilo padrão do Matplotlib exibido pelo Streamlit."""
+    return
 
 
 def _exibir_grafico_barras(dados, titulo, eixo_x, eixo_y, cor="#5e9188"):
@@ -2035,7 +2085,7 @@ def _exibir_grafico_barras(dados, titulo, eixo_x, eixo_y, cor="#5e9188"):
         altura = barra.get_height()
         eixo.annotate(f"{altura:.0f}", (barra.get_x() + barra.get_width() / 2, altura),
                       ha="center", va="bottom", fontsize=9,
-                      color="#ffffff" if st.session_state.get("tema_visual") == "Escuro" else "#232226")
+                      color="#262730")
     figura.tight_layout()
     st.pyplot(figura, use_container_width=True)
     plt.close(figura)
@@ -2106,7 +2156,7 @@ def relatorio_sla_desempenho(chamados):
     eixo.set_title("Situação dos prazos de SLA", loc="left", fontweight="bold")
     legenda = eixo.legend(frameon=False)
     for texto in legenda.get_texts():
-        texto.set_color("#ffffff" if st.session_state.get("tema_visual") == "Escuro" else "#232226")
+        texto.set_color("#262730")
     eixo.spines[["top", "right"]].set_visible(False)
     figura.tight_layout()
     st.pyplot(figura, use_container_width=True)
@@ -2548,14 +2598,165 @@ def relatorio_operacional(chamados, admin):
         st.caption(f"Satisfação média: {sum(item['nota'] for item in pesquisas) / len(pesquisas):.1f}/5 em {len(pesquisas)} avaliação(ões).")
     carga = ativos.groupby(ativos["equipe_destino"].fillna("Sem equipe")).size().reset_index(name="Backlog")
     carga.columns = ["Equipe", "Backlog"]
-    _exibir_grafico_barras(carga, "Carga atual por equipe", "Equipe", "Backlog", "#5e9188")
     tendencia = dados.copy()
     tendencia["criado_em"] = pd.to_datetime(tendencia["criado_em"])
     tendencia = tendencia.groupby(tendencia["criado_em"].dt.date).size().reset_index(name="Chamados abertos")
     tendencia.columns = ["Data", "Chamados abertos"]
-    _exibir_grafico_barras(tendencia, "Tendência de abertura no período", "Data", "Chamados abertos", "#3e5954")
+    carga_coluna, tendencia_coluna = st.columns(2)
+    with carga_coluna:
+        _exibir_grafico_barras(carga, "Carga atual por equipe", "Equipe", "Backlog", "#5e9188")
+    with tendencia_coluna:
+        _exibir_grafico_barras(tendencia, "Tendência de abertura no período", "Data", "Chamados abertos", "#3e5954")
     exportacao = dados[["id", "status", "categoria", "urgencia", "equipe_destino", "criado_em", "resolvido_em"]].copy()
     st.download_button("Exportar indicadores operacionais (CSV)", exportacao.to_csv(index=False).encode("utf-8-sig"), "indicadores_operacionais.csv", "text/csv")
+
+
+def relatorio_chamados_abertos_por_departamento(chamados):
+    """Exibe o backlog por departamento do solicitante, incluindo departamentos sem demanda."""
+    st.markdown("### Chamados abertos por departamento")
+    st.caption(
+        "Considera os chamados que ainda não foram fechados ou cancelados, conforme o "
+        "departamento do solicitante."
+    )
+
+    dados = pd.DataFrame(chamados)
+    departamentos = listar_departamentos()
+    nomes_departamentos = [departamento["nome"] for departamento in departamentos]
+
+    if dados.empty:
+        abertos_por_departamento = pd.DataFrame({
+            "Departamento": nomes_departamentos,
+            "Chamados abertos": [0] * len(nomes_departamentos),
+        })
+    else:
+        abertos = dados[~dados["status"].isin(STATUS_ENCERRADOS)].copy()
+        abertos["Departamento"] = (
+            abertos["departamento_usuario"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", "Não informado")
+        )
+        contagem = abertos.groupby("Departamento").size()
+        ordem = list(dict.fromkeys(nomes_departamentos + contagem.index.tolist()))
+        abertos_por_departamento = pd.DataFrame({
+            "Departamento": ordem,
+            "Chamados abertos": [int(contagem.get(nome, 0)) for nome in ordem],
+        })
+
+    total_abertos = int(abertos_por_departamento["Chamados abertos"].sum())
+    sem_departamento = int(
+        abertos_por_departamento.loc[
+            abertos_por_departamento["Departamento"] == "Não informado", "Chamados abertos"
+        ].sum()
+    )
+    maior_demanda = abertos_por_departamento.sort_values(
+        "Chamados abertos", ascending=False
+    ).head(1)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Chamados abertos", total_abertos)
+    c2.metric(
+        "Departamento com maior demanda",
+        maior_demanda.iloc[0]["Departamento"] if total_abertos else "—",
+        f"{int(maior_demanda.iloc[0]['Chamados abertos'])} chamado(s)" if total_abertos else None,
+    )
+    c3.metric("Sem departamento informado", sem_departamento)
+
+    if abertos_por_departamento.empty:
+        st.info("Cadastre departamentos para acompanhar a distribuição dos chamados.")
+        return
+
+    abertos_por_departamento = abertos_por_departamento.sort_values(
+        ["Chamados abertos", "Departamento"], ascending=[False, True]
+    ).reset_index(drop=True)
+    grafico, tabela = st.columns([1.4, 1])
+    with grafico:
+        _exibir_grafico_barras(
+            abertos_por_departamento,
+            "Backlog por departamento",
+            "Departamento",
+            "Chamados abertos",
+            "#1f5f78",
+        )
+    with tabela:
+        exibir_tabela_tematica(abertos_por_departamento)
+
+
+def relatorio_demanda_por_departamento_categoria(chamados):
+    """Evidencia volume e motivos recorrentes de abertura por departamento."""
+    st.markdown("### Demanda por departamento e categoria")
+    st.caption(
+        "Mostra todos os chamados criados no período selecionado, inclusive os já fechados. "
+        "Use este recorte para identificar temas que podem ser tratados com treinamento ou melhoria de processo."
+    )
+
+    dados = pd.DataFrame(chamados)
+    if dados.empty:
+        st.info("Ainda não há chamados no período selecionado para analisar a demanda.")
+        return
+
+    dados["Departamento"] = (
+        dados["departamento_usuario"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", "Não informado")
+    )
+    dados["Categoria"] = (
+        dados["categoria"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", "Não classificada")
+    )
+    demanda_departamento = (
+        dados.groupby("Departamento", as_index=False)
+        .size()
+        .rename(columns={"size": "Chamados criados"})
+        .sort_values(["Chamados criados", "Departamento"], ascending=[False, True])
+        .reset_index(drop=True)
+    )
+    departamento_selecionado = st.selectbox(
+        "Analisar categorias do departamento",
+        demanda_departamento["Departamento"].tolist(),
+        key="dashboard_departamento_categoria",
+    )
+    categorias = (
+        dados[dados["Departamento"] == departamento_selecionado]
+        .groupby("Categoria", as_index=False)
+        .size()
+        .rename(columns={"size": "Chamados criados"})
+        .sort_values(["Chamados criados", "Categoria"], ascending=[False, True])
+    )
+
+    categoria_principal = categorias.iloc[0]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Chamados criados no período", len(dados))
+    c2.metric("Departamento com maior demanda", demanda_departamento.iloc[0]["Departamento"])
+    c3.metric(
+        f"Categoria mais recorrente em {departamento_selecionado}",
+        categoria_principal["Categoria"],
+        f"{int(categoria_principal['Chamados criados'])} chamado(s)",
+    )
+
+    grafico, tabela = st.columns([1.4, 1])
+    with grafico:
+        _exibir_grafico_barras(
+            categorias,
+            f"Categorias recorrentes — {departamento_selecionado}",
+            "Categoria",
+            "Chamados criados",
+            "#8a5a00",
+        )
+    with tabela:
+        exibir_tabela_tematica(demanda_departamento)
+
+    matriz = pd.crosstab(dados["Departamento"], dados["Categoria"])
+    matriz["Total"] = matriz.sum(axis=1)
+    matriz = matriz.sort_values("Total", ascending=False).reset_index()
+    st.markdown("#### Comparativo de demanda por categoria")
+    exibir_tabela_tematica(matriz)
 
 
 def painel_perfis_admin(admin):
@@ -2742,7 +2943,7 @@ def painel_perfil_usuario_admin(admin):
     m1, m2, m3 = st.columns(3)
     m1.metric("Perfil", conta.get("perfil_nome") or "Não informado")
     m2.metric("Departamento", conta.get("departamento") or "Não informado")
-    m3.metric("Último login", conta["ultimo_login_em"].strftime("%d/%m/%Y %H:%M") if conta.get("ultimo_login_em") else "Nunca acessou")
+    m3.metric("Último login", para_horario_local(conta["ultimo_login_em"]).strftime("%d/%m/%Y %H:%M") if conta.get("ultimo_login_em") else "Nunca acessou")
 
     with st.container(border=True):
         st.caption("Dados de identificação e vínculo organizacional. Campos adicionais são opcionais.")
@@ -2921,48 +3122,66 @@ def tela_admin(usuario):
     if navegacao == "Dashboards":
         chamados = listar_chamados(limite=5000, executor_id=usuario["id"], para_relatorio=True)
         hoje = datetime.now().date()
-        periodo = st.date_input("Período dos indicadores", value=(hoje.replace(day=1), hoje), max_value=hoje)
+        st.subheader("Painel de indicadores")
+        st.caption("Acompanhe a operação por período. Os filtros se aplicam a todos os painéis abaixo.")
+        filtro_periodo, resumo_periodo = st.columns([1, 2])
+        with filtro_periodo:
+            periodo = st.date_input(
+                "Período dos indicadores",
+                value=(hoje.replace(day=1), hoje),
+                max_value=hoje,
+            )
         if isinstance(periodo, tuple) and len(periodo) == 2:
             inicio, fim = periodo
             chamados = [c for c in chamados if c.get("criado_em") and inicio <= c["criado_em"].date() <= fim]
-        relatorio_operacional(chamados, usuario)
-        st.divider()
-        relatorio_usuarios(usuarios)
-        st.divider()
-        relatorio_sla_desempenho(chamados)
-        st.divider()
-        relatorio_ia(chamados, usuario)
-        st.divider()
-        with st.expander("Adicionar caso anonimizado para avaliação da IA"):
-            st.caption("Use apenas relatos reais já anonimizados e revisados. Estes casos medem a IA; não entram na base RAG.")
-            with st.form("caso_avaliacao_ia"):
-                identificador = st.text_input("Identificador sem dado pessoal (ex.: AVAL-001)")
-                titulo_caso = st.text_input("Título anonimizado")
-                descricao_caso = st.text_area("Descrição anonimizada")
+        with resumo_periodo:
+            st.metric("Chamados no período", len(chamados))
+
+        visao_geral, operacao_sla, pessoas, inteligencia = st.tabs([
+            "Visão geral", "Operação e SLA", "Pessoas", "IA e conhecimento",
+        ])
+        with visao_geral:
+            relatorio_operacional(chamados, usuario)
+            st.divider()
+            relatorio_chamados_abertos_por_departamento(chamados)
+            st.divider()
+            relatorio_demanda_por_departamento_categoria(chamados)
+        with operacao_sla:
+            relatorio_sla_desempenho(chamados)
+            st.divider()
+            relatorio_produtividade_equipe(chamados)
+            st.divider()
+            relatorio_cancelamentos(chamados)
+        with pessoas:
+            relatorio_usuarios(usuarios)
+        with inteligencia:
+            relatorio_ia(chamados, usuario)
+            with st.expander("Adicionar caso anonimizado para avaliação da IA"):
+                st.caption("Use apenas relatos reais já anonimizados e revisados. Estes casos medem a IA; não entram na base RAG.")
+                with st.form("caso_avaliacao_ia"):
+                    identificador = st.text_input("Identificador sem dado pessoal (ex.: AVAL-001)")
+                    titulo_caso = st.text_input("Título anonimizado")
+                    descricao_caso = st.text_area("Descrição anonimizada")
+                    c1, c2, c3 = st.columns(3)
+                    categoria_caso = c1.selectbox("Categoria esperada", ["Acesso", "Software", "Hardware", "Rede", "Outros"])
+                    urgencia_caso = c2.selectbox("Urgência esperada", ["Baixa", "Media", "Alta", "Critica"])
+                    equipe_caso = c3.selectbox("Equipe esperada", ["Suporte", "Software", "Hardware", "Redes"])
+                    salvar_caso = st.form_submit_button("Salvar caso de avaliação")
+                if salvar_caso:
+                    cadastrar_caso_avaliacao_ia(identificador, titulo_caso, descricao_caso, categoria_caso, urgencia_caso, equipe_caso, usuario["id"])
+                    st.success("Caso de avaliação anonimizado registrado.")
+            casos_avaliacao = listar_casos_avaliacao_ia(usuario["id"])
+            if casos_avaliacao and st.button("Executar avaliação de classificação", key="executar_avaliacao_ia"):
+                with st.spinner("Executando conjunto de avaliação..."):
+                    avaliacao = avaliar_classificador(casos_avaliacao)
+                    registrar_execucao_avaliacao_ia(avaliacao, usuario["id"])
                 c1, c2, c3 = st.columns(3)
-                categoria_caso = c1.selectbox("Categoria esperada", ["Acesso", "Software", "Hardware", "Rede", "Outros"])
-                urgencia_caso = c2.selectbox("Urgência esperada", ["Baixa", "Media", "Alta", "Critica"])
-                equipe_caso = c3.selectbox("Equipe esperada", ["Suporte", "Software", "Hardware", "Redes"])
-                salvar_caso = st.form_submit_button("Salvar caso de avaliação")
-            if salvar_caso:
-                cadastrar_caso_avaliacao_ia(identificador, titulo_caso, descricao_caso, categoria_caso, urgencia_caso, equipe_caso, usuario["id"])
-                st.success("Caso de avaliação anonimizado registrado.")
-        casos_avaliacao = listar_casos_avaliacao_ia(usuario["id"])
-        if casos_avaliacao and st.button("Executar avaliação de classificação", key="executar_avaliacao_ia"):
-            with st.spinner("Executando conjunto de avaliação..."):
-                avaliacao = avaliar_classificador(casos_avaliacao)
-                registrar_execucao_avaliacao_ia(avaliacao, usuario["id"])
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Categoria (benchmark)", f"{avaliacao['categoria'] * 100:.1f}%")
-            c2.metric("Urgência (benchmark)", f"{avaliacao['urgencia'] * 100:.1f}%")
-            c3.metric("Equipe (benchmark)", f"{avaliacao['equipe'] * 100:.1f}%")
-            exibir_tabela_tematica(pd.DataFrame(avaliacao["resultados"]))
-        st.divider()
-        relatorio_aprendizado_por_casos(usuario)
-        st.divider()
-        relatorio_produtividade_equipe(chamados)
-        st.divider()
-        relatorio_cancelamentos(chamados)
+                c1.metric("Categoria (benchmark)", f"{avaliacao['categoria'] * 100:.1f}%")
+                c2.metric("Urgência (benchmark)", f"{avaliacao['urgencia'] * 100:.1f}%")
+                c3.metric("Equipe (benchmark)", f"{avaliacao['equipe'] * 100:.1f}%")
+                exibir_tabela_tematica(pd.DataFrame(avaliacao["resultados"]))
+            st.divider()
+            relatorio_aprendizado_por_casos(usuario)
 
     if navegacao == "Auditoria":
         painel_auditoria_admin(usuario)
@@ -3060,7 +3279,7 @@ def tela_admin(usuario):
                 col_email.write(conta["email"])
                 col_papel.write(conta.get("perfil_nome") or "Sem perfil")
                 ultimo_login = conta.get("ultimo_login")
-                col_login.write(ultimo_login.strftime("%d/%m/%Y %H:%M") if ultimo_login else "Nunca acessou")
+                col_login.write(para_horario_local(ultimo_login).strftime("%d/%m/%Y %H:%M") if ultimo_login else "Nunca acessou")
                 if pode_gerenciar_usuarios:
                     col_acao.button(
                         "Abrir perfil", key=f"abrir_usuario_{conta['id']}",

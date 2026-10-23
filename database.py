@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import bcrypt
 import mysql.connector
 from dotenv import load_dotenv
@@ -17,10 +18,21 @@ from observability import configurar_logging
 
 logger = logging.getLogger(__name__)
 
+FUSO_HORARIO_EXIBICAO = ZoneInfo("America/Sao_Paulo")
+
 
 def agora_utc():
     """Data UTC sem tzinfo para compatibilidade com DATETIME/TIMESTAMP do MySQL."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def para_horario_local(data):
+    """Converte uma data UTC do banco para o horário de São Paulo na interface."""
+    if data is None:
+        return None
+    if data.tzinfo is None:
+        data = data.replace(tzinfo=timezone.utc)
+    return data.astimezone(FUSO_HORARIO_EXIBICAO)
 
 load_dotenv()
 
