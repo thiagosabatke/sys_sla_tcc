@@ -1,5 +1,8 @@
 import json
 from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+FUSO_HORARIO_COMERCIAL = ZoneInfo("America/Sao_Paulo")
 
 MATRIZ_SLA_MINUTOS = {
     "Critica": {"resposta": 15, "resolucao": 240}, "Alta": {"resposta": 60, "resolucao": 480},
@@ -82,7 +85,10 @@ def _prazo_efetivo(prazo, pausado, pausado_em, agora, config):
 
 
 def avaliar_metrica(criado_em, prazo, concluido_em, pausado_em, tempo_pausado_min, configuracao=None, agora=None):
-    agora, config = agora or datetime.now(), normalizar_configuracao(configuracao)
+    # Os valores recebidos são horas civis de São Paulo. Não dependa do fuso
+    # da máquina onde o Streamlit está executando.
+    agora = agora or datetime.now(FUSO_HORARIO_COMERCIAL).replace(tzinfo=None)
+    config = normalizar_configuracao(configuracao)
     if _ausente(prazo): return {"status": "Dentro do prazo", "prazo_efetivo": None, "minutos_restantes": None}
     if _ausente(criado_em): return {"status": "Não aplicável", "prazo_efetivo": None, "minutos_restantes": None}
     concluido_em = None if _ausente(concluido_em) else concluido_em

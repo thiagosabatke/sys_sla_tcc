@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import mysql.connector
 from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
 from html import escape
 from pathlib import Path
 
@@ -233,11 +234,38 @@ def injetar_css():
             border: 1px solid #5e9188; box-shadow: 0 0 0 1px #5e9188 inset;
         }
 
+        .ticket-metrics {
+            display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 0.55rem; margin: 0.85rem 0;
+        }
+        .ticket-metric {
+            min-width: 0; padding: 0.72rem 0.75rem; border: 1px solid #3e5954;
+            border-radius: 10px; background: linear-gradient(145deg, #2b3c4c, #253342);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 2px 5px rgba(0,0,0,0.12);
+        }
+        .ticket-metric__label {
+            display: block; color: #b9d3cd; font-size: 0.65rem; font-weight: 700;
+            letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 0.18rem;
+        }
+        .ticket-metric__value { display: block; color: #ffffff; font-size: 0.82rem; font-weight: 700; overflow-wrap: anywhere; }
+        .ticket-metric--critica { border-left: 4px solid #dc2626; }
+        .ticket-metric--alta { border-left: 4px solid #f97316; }
+        .ticket-metric--media { border-left: 4px solid #d97706; }
+        .ticket-metric--baixa { border-left: 4px solid #16a34a; }
+        .ticket-metric--pendente { border-left: 4px solid #d97706; }
+        .ticket-metric--respondida { border-left: 4px solid #16a34a; }
+        .ticket-metric--encerrado { border-left: 4px solid #64748b; }
+        .ticket-metric--violado { border-left: 4px solid #dc2626; }
+        .ticket-metric--risco { border-left: 4px solid #f97316; }
+        .ticket-metric--pausado { border-left: 4px solid #9333ea; }
+
         .metric-row { display: flex; gap: 0.8rem; margin-bottom: 1rem; }
 
         .sla-pill {
-            display: inline-block; background: #5e9188; border-radius: 8px;
-            padding: 2px 8px; font-size: 0.75rem; color: #232226; font-weight: 650; margin-right: 6px;
+            display: inline-flex; align-items: center; border: 1px solid #5e9188;
+            border-radius: 999px; padding: 0.28rem 0.58rem; font-size: 0.74rem;
+            color: #ffffff; font-weight: 650; margin: 0 0.32rem 0.35rem 0;
+            background: rgba(94, 145, 136, 0.12); box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
         }
 
         .artigo-card {
@@ -367,6 +395,7 @@ def injetar_css():
             .app-header { padding: 0.75rem 0.9rem; }
             .app-header h1 { font-size: 1.08rem; }
             .card { padding: 0.8rem; }
+            .ticket-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
     </style>
     """, unsafe_allow_html=True)
@@ -393,7 +422,9 @@ def injetar_css():
             }
             .card-title, .artigo-titulo, .artigo-secao-titulo { color: #ffffff; }
             .card-meta, .artigo-resumo { color: #d7e4e1; }
-            .sla-pill, .artigo-tag { background: #3e5954; color: #ffffff; }
+            .sla-pill { background: rgba(94, 145, 136, 0.12); color: #ffffff; }
+            .artigo-tag { background: #3e5954; color: #ffffff; }
+            .ticket-metric { background: #232226; border-color: #3e5954; }
             [data-testid="stMetric"] { border-left: 4px solid #5e9188; padding: 0.75rem; border-radius: 10px; }
             [data-testid="stExpander"], [data-testid="stExpander"] details,
             [data-testid="stExpander"] details > summary,
@@ -771,9 +802,19 @@ def etiquetas_fila(chamado, estado_sla):
     status = chamado.get("status") or "Não informado"
     urgencia = chamado.get("urgencia") or "Não informada"
     icone_status = "✅" if status in {"Resolvido", "Fechado"} else ""
+    if status == "Cancelado":
+        resposta = "Encerrado"
+        cor_resposta, icone_resposta = "#64748b", ""
+    elif chamado.get("primeira_resposta_em"):
+        resposta = "Respondido"
+        cor_resposta, icone_resposta = "#16a34a", "✓"
+    else:
+        resposta = "Sem resposta"
+        cor_resposta, icone_resposta = "#d97706", "⏳"
     return "".join((
         bloco_fila(status, CORES_FILA_STATUS.get(status, "#64748b"), icone_status),
         bloco_fila(urgencia, CORES_FILA_URGENCIA.get(urgencia, "#64748b"), ICONE_URGENCIA.get(urgencia, "")),
+        bloco_fila(resposta, cor_resposta, icone_resposta),
     ))
 
 
@@ -784,6 +825,64 @@ def etiquetas_sla_fila(estado_sla):
         return bloco_fila(f"{etapa}: {situacao}", CORES_FILA_SLA.get(situacao, "#64748b"), icone)
 
     return etiqueta("Resposta", estado_sla["resposta"]["status"]) + etiqueta("Resolução", estado_sla["resolucao"]["status"])
+
+
+def exibir_cartao_chamado(chamado, estado_sla, contexto, selecionado, chave_botao):
+    """Renderiza o cartão padrão usado em todas as listas de chamados."""
+    with st.container(border=True):
+        st.markdown(f"**#{chamado['id']} · {chamado['titulo']}**")
+        st.markdown(etiquetas_fila(chamado, estado_sla), unsafe_allow_html=True)
+        st.markdown(etiquetas_sla_fila(estado_sla), unsafe_allow_html=True)
+        st.caption(contexto)
+        if selecionado:
+            st.button(
+                "Chamado selecionado", key=chave_botao, type="primary",
+                use_container_width=True, disabled=True,
+            )
+            return False
+        return st.button("Ver detalhes", key=chave_botao, use_container_width=True)
+
+
+def painel_metricas_chamado(chamado, estado_sla=None):
+    """Resumo visual dos indicadores operacionais mais relevantes do chamado."""
+    estado_sla = estado_sla or sla.status_sla(chamado)
+    urgencia = chamado.get("urgencia") or "Não informada"
+    icone_urgencia = ICONE_URGENCIA.get(urgencia, "•")
+    classe_urgencia = {
+        "Critica": "critica", "Alta": "alta", "Media": "media", "Baixa": "baixa",
+    }.get(urgencia, "encerrado")
+    status = chamado.get("status") or "Não informado"
+    if status == "Cancelado":
+        resposta, classe_resposta, icone_resposta = "Não aplicável", "encerrado", "—"
+    elif chamado.get("primeira_resposta_em"):
+        resposta, classe_resposta, icone_resposta = "Respondido", "respondida", "✓"
+    else:
+        resposta, classe_resposta, icone_resposta = "Pendente", "pendente", "⏳"
+    pior_sla = sla.pior_status(estado_sla)
+    classe_sla = {
+        "Violado": "violado", "Em risco": "risco", "Pausado": "pausado",
+        "Cumprido": "respondida", "Dentro do prazo": "respondida",
+    }.get(pior_sla, "encerrado")
+    return f"""
+    <div class="ticket-metrics">
+        <div class="ticket-metric ticket-metric--{classe_urgencia}">
+            <span class="ticket-metric__label">Criticidade</span>
+            <span class="ticket-metric__value">{icone_urgencia} {escape(str(urgencia))}</span>
+        </div>
+        <div class="ticket-metric ticket-metric--{classe_resposta}">
+            <span class="ticket-metric__label">Primeira resposta</span>
+            <span class="ticket-metric__value">{icone_resposta} {resposta}</span>
+        </div>
+        <div class="ticket-metric ticket-metric--{classe_sla}">
+            <span class="ticket-metric__label">SLA</span>
+            <span class="ticket-metric__value">{ICONE_SLA.get(pior_sla, '•')} {escape(str(pior_sla))}</span>
+        </div>
+        <div class="ticket-metric">
+            <span class="ticket-metric__label">Equipe</span>
+            <span class="ticket-metric__value">{escape(str(chamado.get('equipe_destino') or 'Não definida'))}</span>
+        </div>
+    </div>
+    """
 
 
 def classe_card_sla(estado_sla):
@@ -1483,18 +1582,9 @@ def _aba_meus_chamados(usuario, grupo):
     with lista_col:
         for c in chamados:
             selecionado = st.session_state.chamado_aberto_usuario == c["id"]
-            classe_extra = " ticket-selected" if selecionado else ""
             estado_sla = sla.status_sla(c)
-            classe_extra += classe_card_sla(estado_sla)
-            st.markdown(f"""
-            <div class="card{classe_extra}">
-                <div class="card-title">#{c['id']} — {c['titulo']}</div>
-                <div class="card-meta">{badge_status(c['status'])} {badge_urgencia(c['urgencia'])}</div>
-                <div class="card-meta" style="margin-top:6px;">{linha_sla_card(estado_sla)}</div>
-                <div class="card-meta" style="margin-top:6px;">Analista: {c.get('nome_analista') or 'Aguardando atribuição'}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("Ver detalhes", key=f"ver_{c['id']}", use_container_width=True):
+            contexto = f"Responsável: {c.get('nome_analista') or 'Aguardando atribuição'}"
+            if exibir_cartao_chamado(c, estado_sla, contexto, selecionado, f"ver_{c['id']}"):
                 st.session_state.chamado_aberto_usuario = c["id"]
                 st.rerun()
 
@@ -1522,6 +1612,7 @@ def _aba_meus_chamados(usuario, grupo):
             st.markdown(f"{badge_status(chamado['status'])} {badge_urgencia(chamado['urgencia'])}", unsafe_allow_html=True)
             st.write(chamado["descricao"])
 
+            st.markdown(painel_metricas_chamado(chamado), unsafe_allow_html=True)
             st.markdown(f'<span class="sla-pill">👥 Equipe: {chamado.get("equipe_destino") or "—"}</span>', unsafe_allow_html=True)
             bloco_sla_detalhe(chamado, sla.status_sla(chamado))
             st.caption(f"Analista responsável: {chamado.get('nome_analista') or 'Aguardando atribuição'}")
@@ -1697,22 +1788,10 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
             selecionado = st.session_state.chamado_selecionado_analista == c["id"]
             estado_sla = sla.status_sla(c)
             responsavel = c.get("nome_analista") or "Sem atribuição"
-            with st.container(border=True):
-                st.markdown(f"**#{c['id']} · {c['titulo']}**")
-                st.markdown(etiquetas_fila(c, estado_sla), unsafe_allow_html=True)
-                st.markdown(etiquetas_sla_fila(estado_sla), unsafe_allow_html=True)
-                st.caption(
-                    f"Solicitante: {c.get('nome_usuario') or '—'} · "
-                    f"Responsável: {responsavel}"
-                )
-                if selecionado:
-                    st.button(
-                        "Chamado selecionado", key=f"sel_{c['id']}", type="primary",
-                        use_container_width=True, disabled=True,
-                    )
-                elif st.button("Ver detalhes", key=f"sel_{c['id']}", use_container_width=True):
-                    st.session_state.chamado_selecionado_analista = c["id"]
-                    st.rerun()
+            contexto = f"Solicitante: {c.get('nome_usuario') or '—'} · Responsável: {responsavel}"
+            if exibir_cartao_chamado(c, estado_sla, contexto, selecionado, f"sel_{c['id']}"):
+                st.session_state.chamado_selecionado_analista = c["id"]
+                st.rerun()
 
     with detalhe_col:
         chamado_id_sel = st.session_state.chamado_selecionado_analista
@@ -1751,6 +1830,8 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
                         st.warning(f"Atribuído a {chamado.get('nome_analista') or 'outro analista'}")
 
             st.write(chamado["descricao"])
+
+            st.markdown(painel_metricas_chamado(chamado), unsafe_allow_html=True)
 
             categoria_col, equipe_col, ia_col = st.columns(3)
             categoria_col.caption(f"Categoria: {chamado.get('categoria') or '—'}")
@@ -1946,17 +2027,8 @@ def _aba_historico_analista(usuario, chamados_todos):
         for c in chamados_filtrados:
             estado_sla = sla.status_sla(c)
             selecionado = st.session_state.get("chamado_selecionado_historico") == c["id"]
-            classe_extra = " ticket-selected" if selecionado else ""
-            classe_extra += classe_card_sla(estado_sla)
-            st.markdown(f"""
-            <div class="card{classe_extra}">
-                <div class="card-title">#{c['id']} — {c['titulo']}</div>
-                <div class="card-meta">{badge_status(c['status'])} {badge_urgencia(c['urgencia'])}</div>
-                <div class="card-meta" style="margin-top:6px;">{linha_sla_card(estado_sla)}</div>
-                <div class="card-meta" style="margin-top:6px;">👤 {c.get('nome_usuario') or '—'} · 🧑‍💻 {c.get('nome_analista') or '—'}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("Ver registro", key=f"hist_{c['id']}", use_container_width=True):
+            contexto = f"Solicitante: {c.get('nome_usuario') or '—'} · Responsável: {c.get('nome_analista') or '—'}"
+            if exibir_cartao_chamado(c, estado_sla, contexto, selecionado, f"hist_{c['id']}"):
                 st.session_state.chamado_selecionado_historico = c["id"]
                 st.rerun()
 
@@ -1976,6 +2048,8 @@ def _aba_historico_analista(usuario, chamados_todos):
             st.markdown(f"#### #{chamado['id']} — {chamado['titulo']}")
             st.markdown(f"{badge_status(chamado['status'])} {badge_urgencia(chamado['urgencia'])}", unsafe_allow_html=True)
             st.write(chamado["descricao"])
+
+            st.markdown(painel_metricas_chamado(chamado), unsafe_allow_html=True)
 
             st.markdown(
                 f'<span class="sla-pill"> {chamado.get("categoria") or "—"}</span>'
@@ -2021,15 +2095,9 @@ def _aba_cancelados_analista(usuario, chamados_todos):
         st.markdown("##### Chamados cancelados")
         for c in chamados:
             selecionado = st.session_state.chamado_selecionado_cancelado == c["id"]
-            classe_extra = " ticket-selected" if selecionado else ""
-            st.markdown(f"""
-            <div class="card{classe_extra}">
-                <div class="card-title">#{c['id']} — {c['titulo']}</div>
-                <div class="card-meta">{badge_status(c['status'])} {badge_urgencia(c['urgencia'])}</div>
-                <div class="card-meta" style="margin-top:6px;">👤 {c.get('nome_usuario') or '—'}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("Ver registro", key=f"cancel_{c['id']}", use_container_width=True):
+            estado_sla = sla.status_sla(c)
+            contexto = f"Solicitante: {c.get('nome_usuario') or '—'} · Responsável: {c.get('nome_analista') or 'Sem atribuição'}"
+            if exibir_cartao_chamado(c, estado_sla, contexto, selecionado, f"cancel_{c['id']}"):
                 st.session_state.chamado_selecionado_cancelado = c["id"]
                 st.rerun()
 
@@ -2048,6 +2116,7 @@ def _aba_cancelados_analista(usuario, chamados_todos):
             st.markdown(f"#### #{chamado['id']} — {chamado['titulo']}")
             st.markdown(f"{badge_status(chamado['status'])} {badge_urgencia(chamado['urgencia'])}", unsafe_allow_html=True)
             st.write(chamado["descricao"])
+            st.markdown(painel_metricas_chamado(chamado), unsafe_allow_html=True)
             st.caption(
                 f"Solicitante: {chamado.get('nome_usuario') or '—'} · "
                 "SLA: não aplicável (cancelado pelo usuário)."
@@ -2069,7 +2138,13 @@ def _estilizar_grafico(figura, eixo):
 
 def _exibir_grafico_barras(dados, titulo, eixo_x, eixo_y, cor="#5e9188"):
     """Exibe um gráfico Matplotlib consistente e trata conjuntos de dados vazios."""
-    if dados.empty or dados[eixo_y].sum() == 0:
+    if dados.empty or eixo_x not in dados or eixo_y not in dados:
+        st.info("Ainda não há dados suficientes para este gráfico.")
+        return
+
+    dados = dados[[eixo_x, eixo_y]].copy()
+    dados[eixo_y] = pd.to_numeric(dados[eixo_y], errors="coerce").fillna(0)
+    if dados[eixo_y].sum() <= 0:
         st.info("Ainda não há dados suficientes para este gráfico.")
         return
 
@@ -2187,7 +2262,7 @@ def relatorio_ia(chamados, admin):
         st.info("Ainda não há chamados classificados pela IA para analisar.")
         return
 
-    niveis = ["Alta", "Média", "Baixa"]
+    niveis = ["Alta", "Média", "Baixa", "Não informada"]
     confianca = (
         dados["confiabilidade"].fillna("Não informada").astype(str).str.strip()
         .replace({"Media": "Média", "media": "Média", "alta": "Alta", "baixa": "Baixa"})
@@ -2258,7 +2333,13 @@ def relatorio_produtividade_equipe(chamados):
     dados["Analista"] = dados["nome_analista"].fillna("Analista removido")
     dados["criado_em"] = pd.to_datetime(dados["criado_em"])
     dados["resolvido_em"] = pd.to_datetime(dados["resolvido_em"])
-    dados["tempo_resolucao_horas"] = ((dados["resolvido_em"] - dados["criado_em"]).dt.total_seconds() / 3600 - dados["tempo_pausado_min"].fillna(0) / 60).clip(lower=0)
+    # mysql-connector devolve DECIMAL como Decimal; o Pandas não permite
+    # subtrair esse tipo de uma série float de horas.
+    tempo_pausado_horas = pd.to_numeric(
+        dados["tempo_pausado_min"], errors="coerce",
+    ).fillna(0).astype(float) / 60
+    duracao_horas = (dados["resolvido_em"] - dados["criado_em"]).dt.total_seconds() / 3600
+    dados["tempo_resolucao_horas"] = (duracao_horas - tempo_pausado_horas).clip(lower=0)
     produtividade = dados.groupby("Analista", as_index=False).agg(
         Atribuídos=("id", "count"),
         Fechados=("status", lambda status: int((status == "Fechado").sum())),
@@ -3080,7 +3161,11 @@ def tela_admin(usuario):
     pode_gerenciar_usuarios = usuario_tem_permissao(usuario["id"], "usuarios.gerenciar")
     pode_visualizar_relatorios = usuario_tem_permissao(usuario["id"], "relatorios.visualizar")
     usuarios = (
-        listar_usuarios(executor_id=usuario["id"], para_relatorio=not pode_visualizar_usuarios)
+        listar_usuarios(
+            limite=5000 if pode_visualizar_relatorios else 200,
+            executor_id=usuario["id"],
+            para_relatorio=pode_visualizar_relatorios,
+        )
         if pode_visualizar_usuarios or pode_visualizar_relatorios else []
     )
 
@@ -3121,7 +3206,7 @@ def tela_admin(usuario):
 
     if navegacao == "Dashboards":
         chamados = listar_chamados(limite=5000, executor_id=usuario["id"], para_relatorio=True)
-        hoje = datetime.now().date()
+        hoje = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
         st.subheader("Painel de indicadores")
         st.caption("Acompanhe a operação por período. Os filtros se aplicam a todos os painéis abaixo.")
         filtro_periodo, resumo_periodo = st.columns([1, 2])

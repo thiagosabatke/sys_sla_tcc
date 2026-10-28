@@ -34,6 +34,31 @@ def para_horario_local(data):
         data = data.replace(tzinfo=timezone.utc)
     return data.astimezone(FUSO_HORARIO_EXIBICAO)
 
+
+def para_horario_local_sem_fuso(data):
+    """Converte uma data UTC do banco para hora civil de São Paulo."""
+    data_local = para_horario_local(data)
+    return data_local.replace(tzinfo=None) if data_local else None
+
+
+def para_utc(data):
+    """Converte hora civil de São Paulo para UTC sem fuso, para persistência."""
+    if data is None:
+        return None
+    if data.tzinfo is None:
+        data = data.replace(tzinfo=FUSO_HORARIO_EXIBICAO)
+    return data.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _registro_em_horario_local(registro):
+    """Devolve uma cópia de um registro com todos os datetimes em São Paulo."""
+    if not registro:
+        return registro
+    return {
+        campo: para_horario_local_sem_fuso(valor) if isinstance(valor, datetime) else valor
+        for campo, valor in registro.items()
+    }
+
 load_dotenv()
 
 TRANSICOES_STATUS = {
@@ -339,9 +364,9 @@ def listar_auditoria(limite=100, usuario_id=None, acao=None, entidade=None,
     if resultado:
         filtros.append("a.resultado = %s"); parametros.append(resultado)
     if inicio:
-        filtros.append("a.criado_em >= %s"); parametros.append(inicio)
+        filtros.append("a.criado_em >= %s"); parametros.append(para_utc(inicio))
     if fim:
-        filtros.append("a.criado_em < %s"); parametros.append(fim)
+        filtros.append("a.criado_em < %s"); parametros.append(para_utc(fim))
     if filtros:
         consulta += " WHERE " + " AND ".join(filtros)
     consulta += " ORDER BY a.id DESC LIMIT %s OFFSET %s"
@@ -349,7 +374,7 @@ def listar_auditoria(limite=100, usuario_id=None, acao=None, entidade=None,
     eventos = cursor.fetchall()
     cursor.close()
     conn.close()
-    return eventos
+    return [_registro_em_horario_local(evento) for evento in eventos]
 
 
 def criar_tabela_departamentos():
@@ -1075,7 +1100,7 @@ def listar_historico_chamado(chamado_id, executor_id):
     conn = conectar(); cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute("SELECT h.*, u.nome AS autor_nome FROM historico_chamados h LEFT JOIN usuarios u ON u.id = h.autor_id WHERE h.chamado_id = %s ORDER BY h.criado_em", (chamado_id,))
-        return cursor.fetchall()
+        return [_registro_em_horario_local(evento) for evento in cursor.fetchall()]
     finally:
         cursor.close(); conn.close()
 
@@ -1271,7 +1296,36 @@ def listar_casos_base_ia(executor_id=None, uso_interno=False):
     casos = cursor.fetchall()
     cursor.close()
     conn.close()
-    return casos
+    return [_registro_em_horario_local(caso) for caso in casos]
+
+
+def recalcular_prazos_sla_em_horario_local():
+    """Corrige prazos criados quando a jornada comercial era calculada em UTC."""
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id, criado_em, urgencia, sla_configuracao FROM chamados")
+        chamados = cursor.fetchall()
+        corrigidos = 0
+        for chamado in chamados:
+            criado_local = para_horario_local_sem_fuso(chamado["criado_em"])
+            configuracao = chamado.get("sla_configuracao")
+            prazo_resposta, prazo_resolucao = sla.calcular_prazos(
+                criado_local, chamado["urgencia"], configuracao,
+            )
+            cursor.execute(
+                "UPDATE chamados SET prazo_resposta = %s, prazo_resolucao = %s WHERE id = %s",
+                (para_utc(prazo_resposta), para_utc(prazo_resolucao), chamado["id"]),
+            )
+            corrigidos += cursor.rowcount
+        conn.commit()
+        return corrigidos
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def salvar_chamado(titulo, descricao, categoria, urgencia, confiabilidade=None,
@@ -1292,7 +1346,14 @@ def salvar_chamado(titulo, descricao, categoria, urgencia, confiabilidade=None,
         raise ValueError("Confiabilidade inválida.")
     criado_em = agora_utc()
     configuracao_sla = obter_configuracao_sla()
-    prazo_resposta, prazo_resolucao = sla.calcular_prazos(criado_em, urgencia, configuracao_sla)
+    # A jornada configurada é de São Paulo; persistimos os prazos em UTC para
+    # preservar uma referência única no banco.
+    criado_em_local = para_horario_local_sem_fuso(criado_em)
+    prazo_resposta_local, prazo_resolucao_local = sla.calcular_prazos(
+        criado_em_local, urgencia, configuracao_sla,
+    )
+    prazo_resposta = para_utc(prazo_resposta_local)
+    prazo_resolucao = para_utc(prazo_resolucao_local)
 
     conn = conectar()
     cursor = conn.cursor()
@@ -1319,7 +1380,10 @@ def salvar_chamado(titulo, descricao, categoria, urgencia, confiabilidade=None,
 
 
 def listar_chamados(limite=20, usuario_id=None, executor_id=None, para_relatorio=False, pagina=0):
-    limite = max(1, min(int(limite), 200))
+    # A fila é limitada para manter a tela responsiva. Relatórios precisam de
+    # uma amostra maior para que totais e gráficos não sejam truncados.
+    limite_maximo = 5000 if para_relatorio else 200
+    limite = max(1, min(int(limite), limite_maximo))
     pagina = max(0, int(pagina))
     if usuario_id is not None:
         if executor_id != usuario_id and not usuario_eh_administrador(executor_id):
@@ -1350,7 +1414,7 @@ def listar_chamados(limite=20, usuario_id=None, executor_id=None, para_relatorio
     resultados = cursor.fetchall()
     cursor.close()
     conn.close()
-    return resultados
+    return [_registro_em_horario_local(chamado) for chamado in resultados]
 
 
 def buscar_chamado_por_id(chamado_id, executor_id):
@@ -1371,7 +1435,7 @@ def buscar_chamado_por_id(chamado_id, executor_id):
         _exigir_acesso_chamado(
             chamado_id, executor_id, "chamados.visualizar_proprios", "chamados.visualizar_fila",
         )
-    return resultado
+    return _registro_em_horario_local(resultado)
 
 
 def _atualizar_status_chamado(chamado_id, novo_status, autor_id=None):
@@ -1408,7 +1472,11 @@ def _atualizar_status_chamado(chamado_id, novo_status, autor_id=None):
         pausado_em_novo = agora
     elif status_atual == "Em Espera" and novo_status != "Em Espera":
         if atual["pausado_em"]:
-            tempo_pausado_min_novo += sla.minutos_uteis_entre(atual["pausado_em"], agora, atual.get("sla_configuracao"))
+            tempo_pausado_min_novo += sla.minutos_uteis_entre(
+                para_horario_local_sem_fuso(atual["pausado_em"]),
+                para_horario_local_sem_fuso(agora),
+                atual.get("sla_configuracao"),
+            )
         pausado_em_novo = None
 
     if novo_status in ("Resolvido", "Fechado"):
@@ -1783,7 +1851,11 @@ def fechar_chamados_resolvidos_automaticamente(agora=None):
         for chamado in chamados:
             configuracao = sla.normalizar_configuracao(chamado.get("sla_configuracao") or {"usar_horario_comercial": False})
             prazo_minutos = configuracao["horas_fechamento_automatico"] * 60
-            if sla.minutos_uteis_entre(chamado["resolvido_em"], agora, configuracao) >= prazo_minutos:
+            if sla.minutos_uteis_entre(
+                para_horario_local_sem_fuso(chamado["resolvido_em"]),
+                para_horario_local_sem_fuso(agora),
+                configuracao,
+            ) >= prazo_minutos:
                 cursor.execute("UPDATE chamados SET status = 'Fechado' WHERE id = %s AND status = 'Resolvido'", (chamado["id"],))
                 if cursor.rowcount:
                     _registrar_auditoria(cursor, None, "CHAMADO_FECHADO_AUTOMATICAMENTE", "chamado", chamado["id"])
@@ -1834,7 +1906,7 @@ def listar_mensagens_chamado(chamado_id, executor_id, limite=100, pagina=0):
     resultados = cursor.fetchall()
     cursor.close()
     conn.close()
-    return list(reversed(resultados))
+    return [_registro_em_horario_local(mensagem) for mensagem in reversed(resultados)]
 
 
 def enviar_mensagem_chamado(chamado_id, autor_id, autor_nome, autor_papel, mensagem):
@@ -1972,7 +2044,7 @@ def listar_anexos_chamado(chamado_id, executor_id):
     resultados = cursor.fetchall()
     cursor.close()
     conn.close()
-    return resultados
+    return [_registro_em_horario_local(anexo) for anexo in resultados]
 
 
 def baixar_anexo_chamado(anexo_id, chamado_id, executor_id):
@@ -2022,7 +2094,7 @@ def buscar_pesquisa_satisfacao(chamado_id, executor_id):
     resultado = cursor.fetchone()
     cursor.close()
     conn.close()
-    return resultado
+    return _registro_em_horario_local(resultado)
 
 
 def listar_pesquisas_satisfacao(executor_id, limite=200, pagina=0):
@@ -2032,7 +2104,7 @@ def listar_pesquisas_satisfacao(executor_id, limite=200, pagina=0):
         cursor.execute("""SELECT id, chamado_id, nota, respondido_em
                           FROM pesquisas_satisfacao ORDER BY respondido_em DESC LIMIT %s OFFSET %s""",
                        (max(1, min(int(limite), 200)), max(0, int(pagina)) * max(1, min(int(limite), 200))))
-        return cursor.fetchall()
+        return [_registro_em_horario_local(pesquisa) for pesquisa in cursor.fetchall()]
     finally:
         cursor.close(); conn.close()
 
@@ -2197,7 +2269,7 @@ def listar_atendimentos_ia(limite=200, pagina=0, executor_id=None):
     resultados = cursor.fetchall()
     cursor.close()
     conn.close()
-    return resultados
+    return [_registro_em_horario_local(resultado) for resultado in resultados]
 
 
 def criar_tabela_casos_avaliacao_ia():
@@ -2460,6 +2532,9 @@ def buscar_usuario_por_email(email):
 def listar_usuarios(executor_id=None, para_relatorio=False, limite=200, pagina=0):
     if not (para_relatorio and usuario_tem_permissao(executor_id, "relatorios.visualizar")):
         exigir_permissao(executor_id, "usuarios.visualizar")
+    limite_maximo = 5000 if para_relatorio else 200
+    limite = max(1, min(int(limite), limite_maximo))
+    pagina = max(0, int(pagina))
     conn = conectar()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
@@ -2471,7 +2546,7 @@ def listar_usuarios(executor_id=None, para_relatorio=False, limite=200, pagina=0
            LEFT JOIN perfis p ON p.id = u.perfil_id
            LEFT JOIN departamentos d ON d.id = u.departamento_id
            ORDER BY u.criado_em DESC LIMIT %s OFFSET %s""",
-        (max(1, min(int(limite), 200)), max(0, int(pagina)) * max(1, min(int(limite), 200))),
+        (limite, pagina * limite),
     )
     resultados = cursor.fetchall()
     cursor.close()

@@ -137,10 +137,16 @@ def migracao_003_integridade():
         cursor.close(); conn.close()
 
 
+def migracao_004_fuso_horario_sla():
+    """Recalcula prazos com a jornada comercial de São Paulo."""
+    database.recalcular_prazos_sla_em_horario_local()
+
+
 MIGRACOES = (
     (1, "schema_inicial", migracao_001_inicial, False),
     (2, "consolidacao_legado", migracao_002_legado, True),
     (3, "restricoes_de_integridade", migracao_003_integridade, True),
+    (4, "fuso_horario_sla", migracao_004_fuso_horario_sla, False),
 )
 
 
