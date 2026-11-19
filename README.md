@@ -57,8 +57,20 @@ em [PRIVACIDADE.md](PRIVACIDADE.md).
 streamlit run app.py
 ```
 
-Na primeira execução, a aplicação cria/migra automaticamente as tabelas de
-usuários, chamados, mensagens, anexos, pesquisas de satisfação e auditoria.
+A aplicação verifica o esquema ao iniciar. As migrações são executadas separadamente,
+conforme [DATABASE_OPERATIONS.md](DATABASE_OPERATIONS.md), com backup e janela de manutenção.
+
+## Organização da interface
+
+As entradas existentes compõem as telas de `pages/_telas.py`, com componentes em
+`ui/` e regras de navegação e sessão em `core/`. O destino inicial depende das
+permissões efetivas; os temas claro e escuro usam o estilo nativo do Streamlit.
+Consulte a [análise da refatoração de UI/UX](docs/REFATORACAO_UI_UX.md) para decisões,
+testes e limitações de validação.
+
+Após editar arquivos Python, reinicie o aplicativo pelo BAT. O observador automático
+de módulos está desativado para evitar que o Streamlit tente carregar dependências
+multimodais opcionais do `transformers`, que não são usadas neste sistema.
 
 ## Fluxo implementado
 

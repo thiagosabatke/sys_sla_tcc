@@ -1,11 +1,10 @@
+import json
 import re
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 import mysql.connector
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
-from html import escape
 from pathlib import Path
 
 from ia_engine import (
@@ -14,43 +13,29 @@ from ia_engine import (
 from rag import listar_artigos
 import sla
 from database import (
-    salvar_chamado, criar_tabela_departamentos, criar_tabelas_rbac, criar_tabela_usuarios,
-    migrar_tabela_usuarios, migrar_usuarios_rbac,
-    migrar_departamentos_usuarios, listar_departamentos, criar_departamento, atualizar_departamento,
-    listar_perfis, listar_perfis_para_atribuicao, listar_permissoes, permissoes_do_perfil,
-    criar_perfil, atualizar_perfil, excluir_perfil,
-    usuario_tem_permissao, usuario_eh_administrador,
-    criar_tabela_chamados, migrar_tabela_chamados, criar_tabela_historico_chamados, criar_tabela_mensagens,
-    criar_tabela_base_casos_ia, migrar_tabela_base_casos_ia,
-    criar_tabela_codigos, migrar_tabela_codigos, listar_chamados, buscar_chamado_por_id,
-    atualizar_status_chamado, atribuir_chamado, listar_mensagens_chamado,
-    registrar_resolucao_chamado,
+    salvar_chamado, listar_departamentos, criar_departamento,
+    atualizar_departamento, listar_perfis, listar_perfis_para_atribuicao,
+    listar_permissoes, permissoes_do_perfil, criar_perfil,
+    atualizar_perfil, excluir_perfil, usuario_tem_permissao,
+    usuario_eh_administrador, listar_chamados, buscar_chamado_por_id,
+    atribuir_chamado, listar_mensagens_chamado, registrar_resolucao_chamado,
     transferir_chamado, escalar_chamado, listar_analistas_para_transferencia,
-    listar_historico_chamado,
-    enviar_mensagem_chamado, listar_usuarios, criar_usuario,
-    buscar_usuario_por_email, redefinir_senha_com_codigo, salvar_totp_secret,
-    salvar_codigo_verificacao, verificar_codigo, buscar_usuario_por_id,
-    atualizar_usuario, excluir_usuario,
+    listar_historico_chamado, enviar_mensagem_chamado, listar_usuarios,
+    criar_usuario, buscar_usuario_por_email, redefinir_senha_com_codigo,
+    salvar_totp_secret, salvar_codigo_verificacao, verificar_codigo,
+    buscar_usuario_por_id, atualizar_usuario, excluir_usuario,
     buscar_titular_por_identificador, buscar_usuario_por_cpf, normalizar_cpf,
-    exportar_dados_titular, anonimizar_titular,
-    criar_tabela_anexos, salvar_anexo_chamado, listar_anexos_chamado, baixar_anexo_chamado,
-    criar_tabela_pesquisas_satisfacao, buscar_pesquisa_satisfacao, listar_pesquisas_satisfacao,
-    salvar_pesquisa_satisfacao,
-    criar_tabela_atendimentos_ia, migrar_tabela_atendimentos_ia, salvar_atendimento_ia,
-    registrar_resultado_atendimento_ia, registrar_feedback_atendimento_ia, listar_atendimentos_ia,
-    criar_tabela_casos_avaliacao_ia, criar_tabela_execucoes_avaliacao_ia, relatorio_qualidade_ia,
+    exportar_dados_titular, anonimizar_titular, salvar_anexo_chamado,
+    listar_anexos_chamado, baixar_anexo_chamado, buscar_pesquisa_satisfacao,
+    listar_pesquisas_satisfacao, salvar_pesquisa_satisfacao, salvar_atendimento_ia,
+    registrar_resultado_atendimento_ia, registrar_feedback_atendimento_ia, relatorio_qualidade_ia,
     cadastrar_caso_avaliacao_ia, listar_casos_avaliacao_ia, registrar_execucao_avaliacao_ia,
-    listar_casos_base_ia,
-    criar_tabela_auditoria, registrar_auditoria, registrar_login,
-    criar_tabelas_privacidade, usuario_aceitou_politica, registrar_aceite_privacidade,
-    VERSAO_POLITICA_PRIVACIDADE,
-    cancelar_chamado_sem_atribuicao,
-    confirmar_resolucao_usuario,
-    reabrir_chamado_usuario,
-    criar_tabela_configuracao_sla, obter_configuracao_sla, atualizar_configuracao_sla,
-    fechar_chamados_resolvidos_automaticamente,
-    listar_auditoria,
-    para_horario_local,
+    listar_casos_base_ia, registrar_auditoria, registrar_login,
+    usuario_aceitou_politica, registrar_aceite_privacidade, VERSAO_POLITICA_PRIVACIDADE,
+    cancelar_chamado_sem_atribuicao, confirmar_resolucao_usuario, reabrir_chamado_usuario,
+    obter_configuracao_sla, atualizar_configuracao_sla, fechar_chamados_resolvidos_automaticamente,
+    listar_auditoria, inserir_dados_demonstracao_dashboard, remover_dados_demonstracao_dashboard,
+    recriar_dados_demonstracao_dashboard, atualizar_departamentos_dados_demonstracao_dashboard, para_horario_local,
 )
 from auth import (
     autenticar, gerar_hash_senha, gerar_codigo_numerico, gerar_totp_secret,
@@ -58,6 +43,20 @@ from auth import (
 )
 from email_utils import enviar_email
 from migrations import schema_pronto
+from core.navigation import PAGINAS_POR_PERMISSAO, paginas_autorizadas, destino_inicial
+from core.session import ESTADO_INICIAL_SESSAO, inicializar_sessao, limpar_sessao
+from ui.components import (
+    cabecalho, exibir_tabela_tematica, exibir_cartao_chamado,
+    painel_metricas_chamado, bloco_sla_detalhe, indicadores,
+    exibir_grafico_barras as _exibir_grafico_barras,
+    painel_acesso, recarregar_com_feedback, notificar, exibir_notificacao,
+    paginar_registros, tabela_usuarios, rotulo,
+    indicadores_destaque_chamado,
+    exibir_status_chamado,
+)
+from ui.admin_dashboard import renderizar_dashboard, duracao_resolucao_horas, departamento_relatorio as _departamento_relatorio
+from ui.analyst_view import filtros_fila, filtrar_fila, resumo_filtros, cartao_fila_compacto
+from ui.requester_view import boas_vindas, contexto_conversa, acompanhar_chamado
 
 
 STATUS_OPCOES = ["Novo", "Em Andamento", "Em Espera", "Resolvido", "Fechado"]
@@ -76,644 +75,10 @@ MOTIVOS_CANCELAMENTO_ANALISTA = [
     "Informações insuficientes para atendimento",
 ]
 
-CORES_STATUS = {
-    "Novo": "#1f5f78",
-    "Aberto": "#1f5f78",
-    "Em Andamento": "#8a5a00",
-    "Em Espera": "#5b3f88",
-    "Resolvido": "#176b4d",
-    "Fechado": "#3e5954",
-    "Cancelado": "#50535a",
-}
-
-CORES_URGENCIA = {
-    "Critica": "#dc2626",
-    "Alta": "#c2410c",
-    "Media": "#a16207",
-    "Baixa": "#15803d",
-}
-
-ICONE_URGENCIA = {"Critica": "🚨", "Alta": "🔴", "Media": "🟠", "Baixa": "🟢"}
-ICONE_SLA = {
-    "Dentro do prazo": "⏱️", "Em risco": "⚠️", "Violado": "🚨",
-    "Cumprido": "✅", "Pausado": "⏸️", "Não aplicável": "—",
-}
-
-
 def injetar_css():
-    """Mantido como ponto de extensão, sem substituir o estilo nativo."""
+    """Compatibilidade com as telas existentes; utiliza apenas o tema nativo."""
     return
 
-    st.markdown("""
-    <style>
-        :root {
-            --brand: #5e9188;
-            --brand-dark: #232226;
-            --surface: #ffffff;
-            --muted: #3e5954;
-            --agenda-active: #5e9188;
-            --agenda-active-text: #ffffff;
-            --agenda-closed: #3e5954;
-            --agenda-closed-text: #ffffff;
-            --input-bg: #ffffff;
-            --input-border: #5e9188;
-            --input-focus: #5e9188;
-            --input-text: #232226;
-            --success: #176b4d;
-            --warning: #8a5a00;
-            --danger: #a82a22;
-            --info: #1f5f78;
-        }
-
-        .stApp { background: #253342; }
-        .block-container { max-width: 1440px; padding-top: 2.25rem; padding-bottom: 3rem; }
-
-        [data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #232226 0%, #253342 100%);
-            border-right: 1px solid #3e5954;
-        }
-        [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
-            padding-top: 0.7rem;
-        }
-        [data-testid="stSidebar"] .stMarkdown,
-        [data-testid="stSidebar"] .stCaption,
-        [data-testid="stSidebar"] label,
-        [data-testid="stSidebar"] p { color: #ffffff; }
-        [data-testid="stSidebar"] [data-testid="stPageLink"] a {
-            color: #ffffff;
-            border-radius: 9px;
-            padding: 0.48rem 0.65rem;
-            transition: background 0.15s ease, color 0.15s ease;
-        }
-        [data-testid="stSidebar"] [data-testid="stPageLink"] a:hover {
-            background: #3e5954;
-            color: #ffffff;
-        }
-        [data-testid="stSidebar"] [data-testid="stPageLink"] a[aria-current="page"] {
-            background: #5e9188;
-            color: #232226;
-            font-weight: 650;
-        }
-        [data-testid="stSidebar"] [data-baseweb="radio"] {
-            padding: 0.28rem 0.4rem;
-            border-radius: 8px;
-        }
-        [data-testid="stSidebar"] [data-baseweb="radio"]:has(input:checked) {
-            background: #5e9188;
-        }
-        [data-testid="stSidebar"] [data-baseweb="radio"]:has(input:checked) label {
-            color: #232226 !important;
-            font-weight: 700;
-        }
-        [data-testid="stSidebar"] hr { border-color: #3e5954; }
-
-        /* A barra lateral não acompanha o tema da área principal: ela mantém
-           a aparência escura em toda a navegação, inclusive nos expansores. */
-        [data-testid="stSidebar"] [data-testid="stExpander"],
-        [data-testid="stSidebar"] [data-testid="stExpander"] details,
-        [data-testid="stSidebar"] [data-testid="stExpander"] details > summary,
-        [data-testid="stSidebar"] [data-testid="stExpander"] details > summary > div {
-            background: #253342 !important;
-            border-color: #3e5954 !important;
-        }
-        [data-testid="stSidebar"] [data-testid="stExpander"] summary,
-        [data-testid="stSidebar"] [data-testid="stExpander"] summary *,
-        [data-testid="stSidebar"] [data-testid="stExpander"] p,
-        [data-testid="stSidebar"] [data-testid="stExpander"] label,
-        [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stCaptionContainer"] {
-            color: #ffffff !important;
-        }
-
-        .sidebar-brand {
-            padding: 0.75rem 0.65rem 0.9rem;
-            margin-bottom: 0.4rem;
-            border-bottom: 1px solid #3e5954;
-        }
-        .sidebar-brand__eyebrow {
-            color: #5e9188; font-size: 0.68rem; font-weight: 700;
-            letter-spacing: 0.12em; text-transform: uppercase;
-        }
-        .sidebar-brand__name {
-            color: #ffffff; font-size: 1.08rem; font-weight: 700; margin-top: 0.15rem;
-        }
-        .sidebar-section {
-            color: #5e9188; font-size: 0.68rem; font-weight: 700;
-            letter-spacing: 0.11em; text-transform: uppercase; margin: 1.1rem 0 0.35rem;
-        }
-
-        .app-header {
-            display: flex; align-items: center; justify-content: space-between;
-            padding: 1.1rem 1.4rem; border-radius: 16px; margin-bottom: 1.6rem;
-            background: linear-gradient(135deg, #232226 0%, #3e5954 100%);
-            box-shadow: 0 12px 28px rgba(35, 34, 38, 0.32);
-            color: #ffffff;
-        }
-        .app-header h1 { font-size: 1.35rem; margin: 0; color: #ffffff; }
-        .app-header .sub { font-size: 0.82rem; color: #5e9188; margin-top: 2px; }
-
-        .badge {
-            display: inline-block; padding: 3px 10px; border-radius: 999px;
-            font-size: 0.72rem; font-weight: 700; color: white; letter-spacing: .2px;
-            box-shadow: 0 1px 2px rgba(35, 34, 38, 0.22);
-        }
-
-        .card {
-            border: 1px solid #5e9188; border-left: 6px solid #5e9188; border-radius: 12px;
-            padding: 1rem 1.2rem; margin-bottom: 0.8rem; background: #ffffff; color: #232226;
-            box-shadow: 0 5px 14px rgba(35, 34, 38, 0.26);
-        }
-        .card:hover { border-color: #232226; transform: translateY(-2px); }
-        .card-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 4px; color: #232226; }
-        .card-meta { font-size: 0.78rem; color: #3e5954; }
-
-        .card-sla-violado { border-left: 4px solid #dc2626; }
-        .card-sla-risco { border-left: 4px solid #d97706; }
-        .card-sla-pausado { border-left: 4px solid #7c3aed; }
-
-        .ticket-selected {
-            border: 1px solid #5e9188; box-shadow: 0 0 0 1px #5e9188 inset;
-        }
-
-        .ticket-metrics {
-            display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 0.55rem; margin: 0.85rem 0;
-        }
-        .ticket-metric {
-            min-width: 0; padding: 0.72rem 0.75rem; border: 1px solid #3e5954;
-            border-radius: 10px; background: linear-gradient(145deg, #2b3c4c, #253342);
-            box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 2px 5px rgba(0,0,0,0.12);
-        }
-        .ticket-metric__label {
-            display: block; color: #b9d3cd; font-size: 0.65rem; font-weight: 700;
-            letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 0.18rem;
-        }
-        .ticket-metric__value { display: block; color: #ffffff; font-size: 0.82rem; font-weight: 700; overflow-wrap: anywhere; }
-        .ticket-metric--critica { border-left: 4px solid #dc2626; }
-        .ticket-metric--alta { border-left: 4px solid #f97316; }
-        .ticket-metric--media { border-left: 4px solid #d97706; }
-        .ticket-metric--baixa { border-left: 4px solid #16a34a; }
-        .ticket-metric--pendente { border-left: 4px solid #d97706; }
-        .ticket-metric--respondida { border-left: 4px solid #16a34a; }
-        .ticket-metric--encerrado { border-left: 4px solid #64748b; }
-        .ticket-metric--violado { border-left: 4px solid #dc2626; }
-        .ticket-metric--risco { border-left: 4px solid #f97316; }
-        .ticket-metric--pausado { border-left: 4px solid #9333ea; }
-
-        .metric-row { display: flex; gap: 0.8rem; margin-bottom: 1rem; }
-
-        .sla-pill {
-            display: inline-flex; align-items: center; border: 1px solid #5e9188;
-            border-radius: 999px; padding: 0.28rem 0.58rem; font-size: 0.74rem;
-            color: #ffffff; font-weight: 650; margin: 0 0.32rem 0.35rem 0;
-            background: rgba(94, 145, 136, 0.12); box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
-        }
-
-        .artigo-card {
-            border: 1px solid #5e9188; border-radius: 12px; padding: 1rem 1.2rem;
-            margin-bottom: 0.8rem; background: #ffffff;
-        }
-        .artigo-titulo { font-weight: 700; font-size: 1.02rem; color: #232226; margin-bottom: 4px; }
-        .artigo-resumo { font-size: 0.85rem; color: #3e5954; }
-        .artigo-tag {
-            display: inline-block; background: #5e9188; color: #232226; font-weight: 650;
-            border-radius: 999px; padding: 2px 10px; font-size: 0.72rem;
-            margin: 6px 6px 0 0;
-        }
-        .artigo-secao-titulo {
-            font-weight: 600; font-size: 0.86rem; color: #232226;
-            margin: 0.9rem 0 0.3rem 0; display: flex; align-items: center; gap: 6px;
-        }
-        [data-testid="stTextInput"] input,
-        [data-testid="stTextArea"] textarea,
-        [data-testid="stNumberInput"] input,
-        [data-testid="stDateInput"] input,
-        [data-testid="stTimeInput"] input {
-            background: var(--input-bg) !important;
-            color: var(--input-text) !important;
-            border: 1.5px solid var(--input-border) !important;
-            border-radius: 8px !important;
-        }
-        [data-baseweb="select"] > div {
-            background: var(--input-bg) !important;
-            border: 1.5px solid var(--input-border) !important;
-            border-radius: 8px !important;
-        }
-        [data-testid="stTextInput"] input:focus,
-        [data-testid="stTextArea"] textarea:focus,
-        [data-testid="stNumberInput"] input:focus,
-        [data-testid="stDateInput"] input:focus,
-        [data-testid="stTimeInput"] input:focus,
-        [data-baseweb="select"] > div:focus-within {
-            border-color: var(--input-focus) !important;
-            box-shadow: 0 0 0 3px rgba(94, 145, 136, 0.35) !important;
-        }
-        [data-testid="stTextInput"] input::placeholder,
-        [data-testid="stTextArea"] textarea::placeholder { color: #3e5954; opacity: 1; }
-        button:focus-visible, input:focus-visible, textarea:focus-visible, [role="button"]:focus-visible {
-            outline: 3px solid #5e9188 !important; outline-offset: 3px !important;
-        }
-        [data-testid="stTabs"] [data-baseweb="tab-list"] { gap: 0.4rem; }
-        [data-testid="stTabs"] [data-baseweb="tab"] {
-            height: 2.55rem; border-radius: 8px 8px 0 0; padding: 0 1rem;
-        }
-        [data-testid="stTabs"] [aria-selected="true"] { font-weight: 700; }
-        [data-testid="stVerticalBlockBorderWrapper"] {
-            background: #ffffff;
-            border-color: #5e9188;
-        }
-        [data-testid="stSidebarCollapseButton"], [data-testid="collapsedControl"] {
-            background: #3e5954;
-            border-radius: 8px;
-        }
-        [data-testid="stBaseButton-primary"] {
-            background: #3e5954 !important;
-            border: 1px solid #3e5954 !important;
-            color: #ffffff !important;
-            font-weight: 700 !important;
-        }
-        [data-testid="stBaseButton-primary"]:hover {
-            background: #253342 !important;
-            border-color: #253342 !important;
-            color: #ffffff !important;
-        }
-        [data-testid="stBaseButton-secondary"] {
-            background: #ffffff !important;
-            border: 1px solid #5e9188 !important;
-            color: #232226 !important;
-            font-weight: 600 !important;
-        }
-        [data-testid="stBaseButton-secondary"]:hover {
-            background: #edf4f2 !important;
-            border-color: #3e5954 !important;
-        }
-        [data-testid="stBaseButton-primary"], [data-testid="stBaseButton-secondary"] {
-            min-height: 2.5rem;
-            border-radius: 8px !important;
-            transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
-        }
-        [data-testid="stBaseButton-primary"]:active, [data-testid="stBaseButton-secondary"]:active {
-            transform: translateY(1px);
-        }
-        [data-testid="stBaseButton-primary"] *,
-        [data-testid="stBaseButton-secondary"] * {
-            color: inherit !important;
-        }
-        [data-testid="stVerticalBlockBorderWrapper"] {
-            padding: 0.35rem;
-            border-radius: 12px;
-        }
-        [data-testid="stVerticalBlockBorderWrapper"] label,
-        [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stMarkdownContainer"] p,
-        [data-testid="stVerticalBlockBorderWrapper"] h1,
-        [data-testid="stVerticalBlockBorderWrapper"] h2,
-        [data-testid="stVerticalBlockBorderWrapper"] h3,
-        [data-testid="stVerticalBlockBorderWrapper"] h4,
-        [data-testid="stVerticalBlockBorderWrapper"] h5,
-        [data-testid="stVerticalBlockBorderWrapper"] h6 { color: #232226 !important; }
-        [data-testid="stTabs"] [data-baseweb="tab-list"] {
-            border-bottom: 1px solid #5e9188;
-        }
-        [data-testid="stTabs"] [data-baseweb="tab"] {
-            color: #ffffff;
-            font-weight: 600;
-        }
-        [data-testid="stTabs"] [aria-selected="true"] {
-            color: #ffffff !important;
-            border-bottom: 3px solid #5e9188 !important;
-        }
-        [data-testid="stAlert"] {
-            border-radius: 8px;
-            border-left-width: 4px;
-            font-size: 0.92rem;
-        }
-        [data-testid="stMetric"] [data-testid="stMetricLabel"],
-        [data-testid="stMetric"] [data-testid="stMetricValue"] {
-            font-weight: 650;
-        }
-        @media (max-width: 700px) {
-            .block-container { padding: 1rem 0.75rem; }
-            .app-header { padding: 0.75rem 0.9rem; }
-            .app-header h1 { font-size: 1.08rem; }
-            .card { padding: 0.8rem; }
-            .ticket-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        }
-    </style>
-    """, unsafe_allow_html=True)
-
-    # Tema único da aplicação por enquanto: escuro.
-    if True:
-        st.markdown("""
-        <style>
-            :root { --agenda-active: #176b4d; --agenda-active-text: #ffffff; --agenda-closed: #3e5954; --agenda-closed-text: #ffffff; --input-bg: #232226; --input-border: #5e9188; --input-focus: #5e9188; --input-text: #ffffff; }
-            .stApp { background: #232226; color: #ffffff; }
-            /* O cabeçalho fixo do Streamlit abriga controles como "Deploy" e não
-               herda o fundo da aplicação. */
-            [data-testid="stHeader"], [data-testid="stToolbar"] {
-                background: #232226 !important;
-            }
-            [data-testid="stMain"], [data-testid="stMain"] p, [data-testid="stMain"] label,
-            [data-testid="stMain"] h1, [data-testid="stMain"] h2, [data-testid="stMain"] h3,
-            [data-testid="stMain"] h4, [data-testid="stMain"] h5, [data-testid="stMain"] h6 { color: #ffffff; }
-            [data-testid="stMain"] .stCaption, [data-testid="stMain"] [data-testid="stCaptionContainer"] { color: #d7e4e1 !important; }
-            .app-header h1 { color: #ffffff !important; }
-            .app-header .sub { color: #b9d3cd !important; }
-            .card, .artigo-card, [data-testid="stVerticalBlockBorderWrapper"], [data-testid="stMetric"] {
-                background: #253342; border-color: #3e5954; color: #ffffff;
-            }
-            .card-title, .artigo-titulo, .artigo-secao-titulo { color: #ffffff; }
-            .card-meta, .artigo-resumo { color: #d7e4e1; }
-            .sla-pill { background: rgba(94, 145, 136, 0.12); color: #ffffff; }
-            .artigo-tag { background: #3e5954; color: #ffffff; }
-            .ticket-metric { background: #232226; border-color: #3e5954; }
-            [data-testid="stMetric"] { border-left: 4px solid #5e9188; padding: 0.75rem; border-radius: 10px; }
-            [data-testid="stExpander"], [data-testid="stExpander"] details,
-            [data-testid="stExpander"] details > summary,
-            [data-testid="stExpander"] details > summary > div,
-            [data-testid="stForm"] {
-                background: #253342 !important;
-                border-color: #3e5954 !important;
-            }
-            [data-testid="stExpander"] details > summary {
-                color: #ffffff !important;
-            }
-            [data-testid="stForm"] {
-                padding: 1rem;
-                border-radius: 10px;
-            }
-            [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea,
-            [data-testid="stSelectbox"] [data-baseweb="select"],
-            [data-testid="stSelectbox"] [data-baseweb="select"] > div,
-            [data-testid="stSelectbox"] [data-baseweb="select"] > div > div,
-            [data-testid="stSelectbox"] [role="combobox"],
-            [data-baseweb="input"] > div {
-                background: #253342 !important;
-                color: #ffffff !important;
-                border-color: #5e9188 !important;
-            }
-            [data-testid="stSelectbox"] [data-baseweb="select"] input {
-                background: #253342 !important;
-                color: #ffffff !important;
-                -webkit-text-fill-color: #ffffff !important;
-            }
-            [data-baseweb="select"] *, [data-baseweb="input"] * { color: #ffffff !important; }
-            /* Evita que o botão de revelar senha e a seta dos selects mantenham
-               o fundo claro padrão do BaseWeb. */
-            [data-testid="stTextInput"] [data-baseweb="input"] button,
-            [data-testid="stSelectbox"] [data-baseweb="select"] button {
-                background: transparent !important;
-                border-color: transparent !important;
-                color: #ffffff !important;
-            }
-            [data-testid="stTextInput"] [data-baseweb="input"] svg,
-            [data-testid="stSelectbox"] [data-baseweb="select"] svg {
-                fill: #ffffff !important;
-                color: #ffffff !important;
-            }
-            [data-testid="stVerticalBlockBorderWrapper"] label,
-            [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stMarkdownContainer"] p,
-            [data-testid="stVerticalBlockBorderWrapper"] h1,
-            [data-testid="stVerticalBlockBorderWrapper"] h2,
-            [data-testid="stVerticalBlockBorderWrapper"] h3,
-            [data-testid="stVerticalBlockBorderWrapper"] h4,
-            [data-testid="stVerticalBlockBorderWrapper"] h5,
-            [data-testid="stVerticalBlockBorderWrapper"] h6 { color: #ffffff !important; }
-            [data-testid="stDataFrame"] {
-                --gdg-bg-cell: #253342 !important;
-                --gdg-bg-cell-medium: #2d3d4d !important;
-                --gdg-bg-header: #3e5954 !important;
-                --gdg-bg-header-has-focus: #486961 !important;
-                --gdg-bg-header-hovered: #486961 !important;
-                --gdg-bg-bubble: #2d3d4d !important;
-                --gdg-bg-bubble-selected: #486961 !important;
-                --gdg-text-dark: #ffffff !important;
-                --gdg-text-medium: #d7e4e1 !important;
-                --gdg-text-light: #b9d3cd !important;
-                --gdg-text-header: #ffffff !important;
-                --gdg-border-color: #3e5954 !important;
-                --gdg-horizontal-border-color: #3e5954 !important;
-                --gdg-link-color: #9fd0c6 !important;
-                background: #253342 !important;
-                border: 1px solid #3e5954;
-                border-radius: 10px;
-                overflow: hidden;
-            }
-            [data-testid="stDataFrame"] .dvn-scroller { background: #253342 !important; }
-            [data-testid="stDataFrame"], [data-testid="stDataFrame"] * { color: #ffffff; }
-            [data-testid="stTable"] table {
-                background: #253342;
-                color: #ffffff;
-                border-color: #3e5954;
-            }
-            [data-testid="stTable"] th {
-                background: #3e5954;
-                color: #ffffff;
-                border-color: #5e9188;
-            }
-            [data-testid="stTable"] td { border-color: #3e5954; }
-            [data-testid="stTable"] tbody tr:nth-child(even) { background: #2d3d4d; }
-            .app-table-wrap {
-                overflow-x: auto;
-                background: #253342;
-                border: 1px solid #5e9188;
-                border-radius: 10px;
-            }
-            .app-table { width: 100%; border-collapse: collapse; color: #ffffff; }
-            .app-table th {
-                background: #3e5954;
-                color: #ffffff;
-                font-weight: 700;
-                text-align: left;
-            }
-            .app-table th, .app-table td {
-                border: 1px solid #3e5954;
-                padding: 0.7rem;
-                vertical-align: top;
-            }
-            .app-table td { background: #253342; }
-            .app-table tbody tr:nth-child(even) td { background: #2d3d4d; }
-            [data-testid="stCheckbox"] {
-                background: #283845;
-                border-left: 3px solid #5e9188;
-                border-radius: 6px;
-                margin: 0.2rem 0;
-                padding: 0.3rem 0.5rem;
-            }
-            [data-testid="stCheckbox"]:has(input:checked) {
-                background: #24483f;
-                border-left-color: #83c7b8;
-            }
-            [data-testid="stCheckbox"]:has(input:disabled) {
-                background: #202b36;
-                border-left: 3px solid #60707e;
-                border-radius: 6px;
-                opacity: 0.72;
-            }
-            [data-testid="stCheckbox"]:has(input:disabled) label { color: #a9b8c2 !important; }
-            [role="tooltip"], [data-baseweb="tooltip"] {
-                background: #18212b !important;
-                border: 1px solid #5e9188 !important;
-                color: #ffffff !important;
-                box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35) !important;
-            }
-            [role="tooltip"] *, [data-baseweb="tooltip"] * { color: #ffffff !important; }
-            [data-testid="stExpander"] { background: #253342; border-color: #3e5954; }
-            [data-testid="stExpander"] summary, [data-testid="stExpander"] summary * { color: #ffffff !important; }
-            [data-testid="stTabs"] [data-baseweb="tab"] { color: #d7e4e1; }
-            [data-testid="stTabs"] [aria-selected="true"] { color: #ffffff !important; }
-            [data-testid="stBaseButton-secondary"], button[kind="secondary"] {
-                background: #253342 !important; border-color: #5e9188 !important; color: #ffffff !important;
-            }
-            [data-testid="stBaseButton-secondary"] *, button[kind="secondary"] * { color: #ffffff !important; }
-            [data-testid="stBaseButton-secondary"]:hover, button[kind="secondary"]:hover {
-                background: #3e5954 !important; border-color: #5e9188 !important; color: #ffffff !important;
-            }
-            [data-testid="stBaseButton-secondary"]:hover *, button[kind="secondary"]:hover * { color: #ffffff !important; }
-            [data-testid="stBaseButton-primary"], button[kind="primary"] {
-                background: #5e9188 !important; border-color: #5e9188 !important; color: #232226 !important;
-            }
-            [data-testid="stBaseButton-primary"] *, button[kind="primary"] * { color: #232226 !important; }
-            [data-testid="stBaseButton-primary"]:hover, button[kind="primary"]:hover {
-                background: #3e5954 !important; border-color: #5e9188 !important; color: #ffffff !important;
-            }
-            [data-testid="stBaseButton-primary"]:hover *, button[kind="primary"]:hover * { color: #ffffff !important; }
-        </style>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <style>
-            :root { --agenda-active: #dceee8; --agenda-active-text: #232226; --agenda-closed: #e6eeec; --agenda-closed-text: #232226; --input-bg: #ffffff; --input-border: #5e9188; --input-focus: #3e5954; --input-text: #232226; }
-            .stApp { background: #f4f7f6; color: #232226; }
-            [data-testid="stMain"], [data-testid="stMain"] p, [data-testid="stMain"] label,
-            [data-testid="stMain"] h1, [data-testid="stMain"] h2, [data-testid="stMain"] h3,
-            [data-testid="stMain"] h4, [data-testid="stMain"] h5, [data-testid="stMain"] h6 { color: #232226; }
-            [data-testid="stMain"] .stCaption, [data-testid="stMain"] [data-testid="stCaptionContainer"] { color: #3e5954 !important; }
-            .app-header h1 { color: #ffffff !important; }
-            .app-header .sub { color: #d7e4e1 !important; }
-            .artigo-tag {
-                background: #eef4f2;
-                border: 1px solid #c7d8d4;
-                color: #253342;
-                box-shadow: none;
-                font-weight: 600;
-            }
-            [data-testid="stMain"] a { color: #1f5f78; }
-            [data-testid="stVerticalBlockBorderWrapper"], [data-testid="stExpander"] {
-                background: #ffffff; border-color: #c7d8d4;
-            }
-            [data-testid="stExpander"] summary, [data-testid="stExpander"] summary * { color: #232226 !important; }
-            [data-testid="stMetric"] {
-                background: #ffffff; border: 1px solid #c7d8d4; border-left: 5px solid #5e9188;
-                padding: 0.75rem; border-radius: 10px; box-shadow: 0 3px 10px rgba(35, 34, 38, 0.08);
-            }
-            [data-testid="stMetric"] [data-testid="stMetricLabel"],
-            [data-testid="stMetric"] [data-testid="stMetricValue"] { color: #232226 !important; }
-            [data-testid="stDataFrame"] {
-                --gdg-bg-cell: #ffffff !important;
-                --gdg-bg-cell-medium: #f1f6f4 !important;
-                --gdg-bg-header: #e0ece8 !important;
-                --gdg-bg-header-has-focus: #cce1da !important;
-                --gdg-bg-header-hovered: #cce1da !important;
-                --gdg-bg-bubble: #e7f4ef !important;
-                --gdg-bg-bubble-selected: #cce1da !important;
-                --gdg-text-dark: #232226 !important;
-                --gdg-text-medium: #3e5954 !important;
-                --gdg-text-light: #63736f !important;
-                --gdg-text-header: #232226 !important;
-                --gdg-border-color: #c7d8d4 !important;
-                --gdg-horizontal-border-color: #d9e5e1 !important;
-                --gdg-link-color: #1f5f78 !important;
-                background: #ffffff;
-                border: 1px solid #c7d8d4;
-                border-radius: 10px;
-                overflow: hidden;
-            }
-            [data-testid="stDataFrame"] .dvn-scroller { background: #ffffff !important; }
-            [data-testid="stTable"] table {
-                background: #ffffff;
-                color: #232226;
-                border-color: #c7d8d4;
-            }
-            [data-testid="stTable"] th {
-                background: #e0ece8;
-                color: #232226;
-                border-color: #b6cec6;
-            }
-            [data-testid="stTable"] td { border-color: #d9e5e1; }
-            [data-testid="stTable"] tbody tr:nth-child(even) { background: #f1f6f4; }
-            .app-table-wrap {
-                overflow-x: auto;
-                background: #ffffff;
-                border: 1px solid #c7d8d4;
-                border-radius: 10px;
-            }
-            .app-table { width: 100%; border-collapse: collapse; color: #232226; }
-            .app-table th {
-                background: #e0ece8;
-                color: #232226;
-                font-weight: 700;
-                text-align: left;
-            }
-            .app-table th, .app-table td {
-                border: 1px solid #d9e5e1;
-                padding: 0.7rem;
-                vertical-align: top;
-            }
-            .app-table td { background: #ffffff; }
-            .app-table tbody tr:nth-child(even) td { background: #f1f6f4; }
-            [data-testid="stCheckbox"] {
-                background: #ffffff;
-                border-left: 3px solid #5e9188;
-                border-radius: 6px;
-                margin: 0.2rem 0;
-                padding: 0.3rem 0.5rem;
-            }
-            [data-testid="stCheckbox"]:has(input:checked) {
-                background: #e7f4ef;
-                border-left-color: #176b4d;
-            }
-            [data-testid="stCheckbox"]:has(input:disabled) {
-                background: #edf1f0;
-                border-left-color: #9aa9a5;
-                opacity: 0.76;
-            }
-            [data-testid="stCheckbox"]:has(input:disabled) label { color: #63736f !important; }
-            [role="tooltip"], [data-baseweb="tooltip"] {
-                background: #ffffff !important;
-                border: 1px solid #5e9188 !important;
-                color: #232226 !important;
-                box-shadow: 0 8px 20px rgba(35, 34, 38, 0.18) !important;
-            }
-            [role="tooltip"] *, [data-baseweb="tooltip"] * { color: #232226 !important; }
-            [data-testid="stTabs"] [data-baseweb="tab"] { color: #3e5954; }
-            [data-testid="stTabs"] [aria-selected="true"] { color: #232226 !important; }
-            [data-testid="stBaseButton-primary"], button[kind="primary"] {
-                background: #3e5954 !important; border-color: #3e5954 !important; color: #ffffff !important;
-            }
-            [data-testid="stBaseButton-primary"] *, button[kind="primary"] * { color: #ffffff !important; }
-            [data-testid="stBaseButton-secondary"], button[kind="secondary"] {
-                background: #ffffff !important; border-color: #5e9188 !important; color: #232226 !important;
-            }
-            [data-testid="stBaseButton-secondary"] *, button[kind="secondary"] * { color: #232226 !important; }
-        </style>
-        """, unsafe_allow_html=True)
-
-
-def exibir_tabela_tematica(dados):
-    """Renderiza a tabela usando o componente padrão do Streamlit."""
-    tabela = dados if isinstance(dados, pd.DataFrame) else pd.DataFrame(dados)
-    if tabela.empty:
-        st.info("Nenhum registro encontrado.")
-        return
-    st.dataframe(tabela, use_container_width=True, hide_index=True)
-
-
-CATEGORIA_COR = {
-    "Acesso": "#1f5f78",
-    "Software": "#5b3f88",
-    "Hardware": "#8a5a00",
-    "Rede": "#176b4d",
-    "Outros": "#3e5954",
-}
 
 ICONE_SECAO = {
     "exemplos de chamados típicos": "📋",
@@ -746,191 +111,12 @@ def _renderizar_secoes_artigo(corpo):
             titulo_secao = linhas[0].lstrip("#").strip()
             conteudo_secao = linhas[1] if len(linhas) > 1 else ""
             icone = ICONE_SECAO.get(titulo_secao.lower(), "🔹")
-            st.markdown(f'<div class="artigo-secao-titulo">{icone} {titulo_secao}</div>', unsafe_allow_html=True)
+            st.markdown(f"##### {icone} {titulo_secao}")
             st.markdown(conteudo_secao)
         else:
             st.markdown(bloco)
 
 
-def badge(texto, cor):
-    return f'<span class="badge" style="background:{cor};">{texto}</span>'
-
-
-def badge_status(status):
-    return badge(status or "-", CORES_STATUS.get(status, "#64748b"))
-
-
-def badge_urgencia(urgencia):
-    icone = ICONE_URGENCIA.get(urgencia, "•")
-    return badge(f"{icone} {urgencia or '-'}", CORES_URGENCIA.get(urgencia, "#64748b"))
-
-
-def badge_sla(texto, status_sla_texto):
-    icone = ICONE_SLA.get(status_sla_texto, "•")
-    return badge(f"{icone} {texto}", sla.CORES_SLA.get(status_sla_texto, "#64748b"))
-
-
-def bloco_fila(texto, cor, icone=""):
-    """Etiqueta de cor sólida usada somente nos cartões da fila de atendimento."""
-    return (
-        '<span style="display:inline-block; padding:0.28rem 0.55rem; margin:0 0.3rem 0.35rem 0; '
-        f'border-radius:0.4rem; background:{cor}; color:#ffffff; font-size:0.78rem; font-weight:600;">'
-        f'{escape(icone)} {escape(str(texto))}</span>'
-    )
-
-
-CORES_FILA_STATUS = {
-    "Novo": "#2563eb",
-    "Aberto": "#2563eb",
-    "Em Andamento": "#f97316",
-    "Em Espera": "#9333ea",
-    "Resolvido": "#16a34a",
-    "Fechado": "#15803d",
-    "Cancelado": "#64748b",
-}
-CORES_FILA_URGENCIA = {
-    "Critica": "#dc2626", "Alta": "#f97316", "Media": "#d97706", "Baixa": "#16a34a",
-}
-CORES_FILA_SLA = {
-    "Dentro do prazo": "#16a34a", "Em risco": "#f97316", "Violado": "#dc2626",
-    "Pausado": "#9333ea", "Cumprido": "#16a34a", "Não aplicável": "#64748b",
-}
-
-
-def etiquetas_fila(chamado, estado_sla):
-    """Agrupa status e urgência em blocos visuais objetivos."""
-    status = chamado.get("status") or "Não informado"
-    urgencia = chamado.get("urgencia") or "Não informada"
-    icone_status = "✅" if status in {"Resolvido", "Fechado"} else ""
-    if status == "Cancelado":
-        resposta = "Encerrado"
-        cor_resposta, icone_resposta = "#64748b", ""
-    elif chamado.get("primeira_resposta_em"):
-        resposta = "Respondido"
-        cor_resposta, icone_resposta = "#16a34a", "✓"
-    else:
-        resposta = "Sem resposta"
-        cor_resposta, icone_resposta = "#d97706", "⏳"
-    return "".join((
-        bloco_fila(status, CORES_FILA_STATUS.get(status, "#64748b"), icone_status),
-        bloco_fila(urgencia, CORES_FILA_URGENCIA.get(urgencia, "#64748b"), ICONE_URGENCIA.get(urgencia, "")),
-        bloco_fila(resposta, cor_resposta, icone_resposta),
-    ))
-
-
-def etiquetas_sla_fila(estado_sla):
-    """Mostra resposta e resolução como blocos independentes, sem marcador de texto."""
-    def etiqueta(etapa, situacao):
-        icone = "🚨" if situacao == "Violado" else "⚠️" if situacao == "Em risco" else "⏸️" if situacao == "Pausado" else "✅" if situacao == "Cumprido" else ""
-        return bloco_fila(f"{etapa}: {situacao}", CORES_FILA_SLA.get(situacao, "#64748b"), icone)
-
-    return etiqueta("Resposta", estado_sla["resposta"]["status"]) + etiqueta("Resolução", estado_sla["resolucao"]["status"])
-
-
-def exibir_cartao_chamado(chamado, estado_sla, contexto, selecionado, chave_botao):
-    """Renderiza o cartão padrão usado em todas as listas de chamados."""
-    with st.container(border=True):
-        st.markdown(f"**#{chamado['id']} · {chamado['titulo']}**")
-        st.markdown(etiquetas_fila(chamado, estado_sla), unsafe_allow_html=True)
-        st.markdown(etiquetas_sla_fila(estado_sla), unsafe_allow_html=True)
-        st.caption(contexto)
-        if selecionado:
-            st.button(
-                "Chamado selecionado", key=chave_botao, type="primary",
-                use_container_width=True, disabled=True,
-            )
-            return False
-        return st.button("Ver detalhes", key=chave_botao, use_container_width=True)
-
-
-def painel_metricas_chamado(chamado, estado_sla=None):
-    """Resumo visual dos indicadores operacionais mais relevantes do chamado."""
-    estado_sla = estado_sla or sla.status_sla(chamado)
-    urgencia = chamado.get("urgencia") or "Não informada"
-    icone_urgencia = ICONE_URGENCIA.get(urgencia, "•")
-    classe_urgencia = {
-        "Critica": "critica", "Alta": "alta", "Media": "media", "Baixa": "baixa",
-    }.get(urgencia, "encerrado")
-    status = chamado.get("status") or "Não informado"
-    if status == "Cancelado":
-        resposta, classe_resposta, icone_resposta = "Não aplicável", "encerrado", "—"
-    elif chamado.get("primeira_resposta_em"):
-        resposta, classe_resposta, icone_resposta = "Respondido", "respondida", "✓"
-    else:
-        resposta, classe_resposta, icone_resposta = "Pendente", "pendente", "⏳"
-    pior_sla = sla.pior_status(estado_sla)
-    classe_sla = {
-        "Violado": "violado", "Em risco": "risco", "Pausado": "pausado",
-        "Cumprido": "respondida", "Dentro do prazo": "respondida",
-    }.get(pior_sla, "encerrado")
-    return f"""
-    <div class="ticket-metrics">
-        <div class="ticket-metric ticket-metric--{classe_urgencia}">
-            <span class="ticket-metric__label">Criticidade</span>
-            <span class="ticket-metric__value">{icone_urgencia} {escape(str(urgencia))}</span>
-        </div>
-        <div class="ticket-metric ticket-metric--{classe_resposta}">
-            <span class="ticket-metric__label">Primeira resposta</span>
-            <span class="ticket-metric__value">{icone_resposta} {resposta}</span>
-        </div>
-        <div class="ticket-metric ticket-metric--{classe_sla}">
-            <span class="ticket-metric__label">SLA</span>
-            <span class="ticket-metric__value">{ICONE_SLA.get(pior_sla, '•')} {escape(str(pior_sla))}</span>
-        </div>
-        <div class="ticket-metric">
-            <span class="ticket-metric__label">Equipe</span>
-            <span class="ticket-metric__value">{escape(str(chamado.get('equipe_destino') or 'Não definida'))}</span>
-        </div>
-    </div>
-    """
-
-
-def classe_card_sla(estado_sla):
-    pior = sla.pior_status(estado_sla)
-    if pior == "Violado":
-        return " card-sla-violado"
-    if pior == "Em risco":
-        return " card-sla-risco"
-    if pior == "Pausado":
-        return " card-sla-pausado"
-    return ""
-
-
-def linha_sla_card(estado_sla):
-    resp = estado_sla["resposta"]
-    reso = estado_sla["resolucao"]
-    texto_resp = f"Resposta: {resp['status']}"
-    texto_reso = f"Resolução: {reso['status']}"
-    return (
-        f"{badge_sla(texto_resp, resp['status'])} "
-        f"{badge_sla(texto_reso, reso['status'])}"
-    )
-
-
-def bloco_sla_detalhe(chamado, estado_sla):
-    resp = estado_sla["resposta"]
-    reso = estado_sla["resolucao"]
-
-    linhas = [
-        f'<span class="sla-pill">Prazo de resposta: {sla.formatar_data(chamado.get("prazo_resposta"))}</span>',
-        badge_sla(resp["status"], resp["status"]),
-    ]
-    if resp["minutos_restantes"] is not None:
-        linhas.append(f'<span class="sla-pill">{sla.formatar_tempo_restante(resp["minutos_restantes"])}</span>')
-
-    st.markdown(" ".join(linhas), unsafe_allow_html=True)
-
-    linhas2 = [
-        f'<span class="sla-pill">Prazo de resolução: {sla.formatar_data(chamado.get("prazo_resolucao"))}</span>',
-        badge_sla(reso["status"], reso["status"]),
-    ]
-    if reso["minutos_restantes"] is not None:
-        linhas2.append(f'<span class="sla-pill">{sla.formatar_tempo_restante(reso["minutos_restantes"])}</span>')
-
-    st.markdown(" ".join(linhas2), unsafe_allow_html=True)
-
-    if chamado.get("tempo_pausado_min") or chamado.get("pausado_em"):
-        st.info("⏸ Em espera: aguardamos uma informação ou ação do solicitante. O relógio de SLA está pausado nesse período.")
 
 
 def _quem_precisa_agir(chamado):
@@ -967,52 +153,33 @@ def linha_do_tempo_chamado(chamado, executor_id):
             st.caption(f"● {sla.formatar_data(data)} — {descricao}")
 
 
-def cabecalho(titulo, subtitulo, icone="🎫"):
-    st.title(f"{icone} {titulo}")
-    st.caption(subtitulo)
-
-
-ESTADO_INICIAL_SESSAO = {
-    "usuario_logado": None,
-    "usuario_pendente_2fa": None,
-    "login_auditoria_registrada": False,
-    "admin_nav": "Usuários",
-    "usuario_nav": "Central de ajuda",
-    "analista_nav": "Fila ativa",
-    "tela_atual": "login",
-    "email_recuperacao": None,
-    "aceite_privacidade_validado": False,
-    "chamado_selecionado_analista": None,
-    "chamado_selecionado_historico": None,
-    "chamado_selecionado_cancelado": None,
-    "usuario_admin_aberto": None,
-    "chamado_aberto_usuario": None,
-}
-
-
 def inicializar_estado_sessao():
-    """Garante o estado de cada sessão, inclusive quando o módulo já está em cache."""
-    for chave, valor_inicial in ESTADO_INICIAL_SESSAO.items():
-        if chave not in st.session_state:
-            st.session_state[chave] = valor_inicial
+    """Preserva as chaves públicas utilizadas pelas páginas."""
+    inicializar_sessao(st.session_state)
+    exibir_notificacao()
+    for prefixo in st.session_state.pop("ui_limpar_prefixos", []):
+        for chave in list(st.session_state):
+            if chave.startswith(prefixo):
+                st.session_state.pop(chave, None)
 
 
 def tela_login():
     injetar_css()
-    col_esq, col_meio, col_dir = st.columns([1, 1.3, 1])
-    with col_meio:
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("### Sistema Inteligente de Chamados")
-        st.caption("Entre com suas credenciais para continuar.")
+    with painel_acesso():
+        st.title("Seu suporte começa aqui")
+        st.write("Entre para tirar dúvidas, acompanhar chamados e acessar sua área de trabalho.")
 
         with st.container(border=True):
             with st.form("form_login"):
-                email = st.text_input("Email")
+                email = st.text_input("E-mail", placeholder="voce@empresa.com.br")
                 senha = st.text_input("Senha", type="password")
-                entrar = st.form_submit_button("Entrar", use_container_width=True, type="primary")
+                entrar = st.form_submit_button("Entrar", width="stretch", type="primary")
 
             if entrar:
-                usuario = autenticar(email, senha)
+                if not email.strip() or not senha:
+                    st.warning("Informe seu e-mail e sua senha para entrar.")
+                    return
+                usuario = autenticar(email.strip(), senha)
                 if usuario is None:
                     registrar_auditoria(None, "LOGIN_FALHOU", "sessao", resultado="FALHA")
                     st.error("Email ou senha inválidos.")
@@ -1041,7 +208,7 @@ def tela_login():
                     st.session_state.login_auditoria_registrada = True
                     st.rerun()
 
-            if st.button("Esqueci minha senha", use_container_width=True):
+            if st.button("Esqueci minha senha", width="stretch"):
                 st.session_state.tela_atual = "esqueci_senha_pedir"
                 st.rerun()
 
@@ -1049,9 +216,9 @@ def tela_login():
 def tela_2fa():
     injetar_css()
     usuario = st.session_state.usuario_pendente_2fa
-    col_esq, col_meio, col_dir = st.columns([1, 1.3, 1])
-    with col_meio:
-        st.markdown("### Verificação em duas etapas")
+    with painel_acesso():
+        st.title("Confirme seu acesso")
+        st.caption("Etapa de segurança · informe o código de seis dígitos.")
 
         usa_app = bool(usuario.get("totp_secret"))
         with st.container(border=True):
@@ -1061,8 +228,8 @@ def tela_2fa():
                 st.write(f"Enviamos um código para **{usuario['email']}**. Confira sua caixa de entrada (e o spam).")
 
             with st.form("form_2fa"):
-                codigo = st.text_input("Código de verificação")
-                confirmar = st.form_submit_button("Confirmar", use_container_width=True, type="primary")
+                codigo = st.text_input("Código de verificação", max_chars=6, placeholder="000000")
+                confirmar = st.form_submit_button("Confirmar", width="stretch", type="primary")
 
             if confirmar:
                 if usa_app:
@@ -1080,22 +247,24 @@ def tela_2fa():
                     registrar_auditoria(usuario["id"], "LOGIN_2FA_FALHOU", "sessao", resultado="FALHA")
                     st.error("Código inválido ou expirado.")
 
-            if st.button("Cancelar e voltar", use_container_width=True):
+            if st.button("Cancelar e voltar", width="stretch"):
                 st.session_state.usuario_pendente_2fa = None
                 st.rerun()
 
 
 def tela_esqueci_senha_pedir():
     injetar_css()
-    col_esq, col_meio, col_dir = st.columns([1, 1.3, 1])
-    with col_meio:
-        st.markdown("### Recuperar senha")
+    with painel_acesso():
+        st.title("Recuperar acesso")
         with st.container(border=True):
             with st.form("form_pedir_codigo"):
                 email = st.text_input("Digite seu email cadastrado")
-                enviar = st.form_submit_button("Enviar código de recuperação", use_container_width=True, type="primary")
+                enviar = st.form_submit_button("Enviar código de recuperação", width="stretch", type="primary")
 
             if enviar:
+                if not email.strip():
+                    st.warning("Informe o e-mail da sua conta para receber as instruções.")
+                    return
                 usuario = buscar_usuario_por_email(email)
                 if usuario is not None:
                     codigo = gerar_codigo_numerico()
@@ -1116,23 +285,22 @@ def tela_esqueci_senha_pedir():
                 st.info("Se existir uma conta para este e-mail, enviaremos instruções de recuperação.")
                 st.rerun()
 
-            if st.button("Voltar ao login", use_container_width=True):
+            if st.button("Voltar ao login", width="stretch"):
                 st.session_state.tela_atual = "login"
                 st.rerun()
 
 
 def tela_esqueci_senha_confirmar():
     injetar_css()
-    col_esq, col_meio, col_dir = st.columns([1, 1.3, 1])
-    with col_meio:
-        st.markdown("### Recuperar senha")
-        st.caption(f"Código enviado para {st.session_state.email_recuperacao}")
+    with painel_acesso():
+        st.title("Recuperar acesso")
+        st.caption(f"Se houver uma conta para {st.session_state.email_recuperacao}, verifique as instruções recebidas por e-mail.")
 
         with st.container(border=True):
             with st.form("form_confirmar_codigo"):
-                codigo = st.text_input("Código recebido por e-mail")
+                codigo = st.text_input("Código recebido por e-mail", max_chars=6, placeholder="000000")
                 nova_senha = st.text_input("Nova senha", type="password")
-                confirmar = st.form_submit_button("Redefinir senha", use_container_width=True, type="primary")
+                confirmar = st.form_submit_button("Redefinir senha", width="stretch", type="primary")
 
             if confirmar:
                 usuario = buscar_usuario_por_email(st.session_state.email_recuperacao)
@@ -1156,7 +324,7 @@ def tela_esqueci_senha_confirmar():
                     )
                     st.error("Código inválido ou expirado.")
 
-            if st.button("Voltar ao login", use_container_width=True):
+            if st.button("Voltar ao login", width="stretch"):
                 st.session_state.tela_atual = "login"
                 st.rerun()
 
@@ -1165,16 +333,8 @@ def sair():
     usuario = st.session_state.get("usuario_logado")
     if usuario:
         registrar_auditoria(usuario["id"], "LOGOUT_REALIZADO", "sessao")
-    st.session_state.usuario_logado = None
-    st.session_state.login_auditoria_registrada = False
-    st.session_state.aceite_privacidade_validado = False
-    for chave in (
-        "chat_mensagens", "chat_turnos_usuario", "chat_resultado_final", "chat_etapa",
-        "chamado_aberto_usuario", "chamado_selecionado_analista",
-        "chamado_selecionado_historico", "chamado_selecionado_cancelado",
-    ):
-        st.session_state.pop(chave, None)
-    st.rerun()
+    limpar_sessao(st.session_state)
+    st.switch_page("app.py")
 
 
 def painel_conversa_chamado(chamado, usuario_atual, papel_atual, key_prefix):
@@ -1195,6 +355,10 @@ def painel_conversa_chamado(chamado, usuario_atual, papel_atual, key_prefix):
         st.caption("Chamado encerrado — não é possível enviar novas mensagens.")
         return
 
+    permissao = "chamados.responder_proprios" if chamado.get("usuario_id") == usuario_atual["id"] else "chamados.responder_atribuidos"
+    if not usuario_tem_permissao(usuario_atual["id"], permissao):
+        st.caption("Seu perfil permite consultar esta conversa, mas não enviar mensagens.")
+        return
     entrada = st.chat_input("Escreva uma mensagem...", key=f"{key_prefix}_chat_{chamado['id']}")
     if entrada:
         enviar_mensagem_chamado(
@@ -1234,12 +398,15 @@ def painel_anexos_chamado(chamado, usuario, key_prefix):
     if chamado["status"] in STATUS_ENCERRADOS:
         return
 
+    permissao = "chamados.anexar_proprios" if chamado.get("usuario_id") == usuario["id"] else "chamados.anexar_atribuidos"
+    if not usuario_tem_permissao(usuario["id"], permissao):
+        return
     with st.form(f"{key_prefix}_form_anexo_{chamado['id']}", clear_on_submit=True):
         arquivo = st.file_uploader(
             "Adicionar anexo à conversa (máximo de 10 MB)",
             key=f"{key_prefix}_anexo_{chamado['id']}",
         )
-        enviar = st.form_submit_button("Enviar anexo", use_container_width=True)
+        enviar = st.form_submit_button("Enviar anexo", width="stretch")
 
     if enviar:
         if arquivo is None:
@@ -1256,8 +423,7 @@ def painel_anexos_chamado(chamado, usuario, key_prefix):
                 except Exception as erro:
                     st.error(f"Não foi possível enviar o anexo: {erro}")
                 else:
-                    st.success("Anexo adicionado ao chamado.")
-                    st.rerun()
+                    recarregar_com_feedback('Anexo adicionado ao chamado.')
 
 
 def painel_pesquisa_satisfacao(chamado, usuario):
@@ -1270,14 +436,15 @@ def painel_pesquisa_satisfacao(chamado, usuario):
         if pesquisa.get("comentario"):
             st.caption(pesquisa["comentario"])
         return
+    if not usuario_tem_permissao(usuario["id"], "chamados.confirmar_resolucao"):
+        return
     with st.form(f"pesquisa_{chamado['id']}"):
         nota = st.radio("Como foi o atendimento?", [1, 2, 3, 4, 5], horizontal=True, format_func=lambda n: f"{n} ★")
         comentario = st.text_area("Comentário (opcional)")
         responder = st.form_submit_button("Enviar avaliação")
     if responder:
         salvar_pesquisa_satisfacao(chamado["id"], nota, comentario.strip() or None, autor_id=usuario["id"])
-        st.success("Obrigado pela sua avaliação!")
-        st.rerun()
+        recarregar_com_feedback('Obrigado pela sua avaliação!')
 
 
 def _aba_portal_conhecimento():
@@ -1298,12 +465,9 @@ def _aba_portal_conhecimento():
     with col_categoria:
         categorias_disponiveis = ["Todas"] + sorted({a["categoria"] for a in artigos})
         categoria_filtro = st.selectbox("Categoria", categorias_disponiveis, key="filtro_categoria_artigos")
-    col_dispositivo, col_servico, col_sintoma = st.columns(3)
-    with col_dispositivo:
+    with st.expander("Refinar a busca", expanded=False):
         dispositivo = st.text_input("Dispositivo", placeholder="Notebook, celular, impressora").strip().lower()
-    with col_servico:
         servico = st.text_input("Serviço", placeholder="E-mail, VPN, Wi-Fi").strip().lower()
-    with col_sintoma:
         sintoma = st.text_input("Sintoma", placeholder="Erro, lento, bloqueado").strip().lower()
 
     def _artigo_corresponde(artigo):
@@ -1326,30 +490,46 @@ def _aba_portal_conhecimento():
     st.caption(f"{len(artigos_filtrados)} de {len(artigos)} orientação(ões)")
 
     if not artigos_filtrados:
-        st.warning("Nenhuma orientação encontrada para essa busca. Tente outro termo ou abra um chamado na aba ao lado.")
+        st.info("Nenhuma orientação encontrada. Tente outro termo ou use o assistente pelo menu do portal.")
         return
 
     for artigo in artigos_filtrados:
-        cor = CATEGORIA_COR.get(artigo["categoria"], "#64748b")
         with st.expander(artigo["titulo"]):
-            st.markdown(
-                f'{badge(artigo["categoria"], cor)} '
-                f'<span class="artigo-resumo">&nbsp; {artigo["resumo"]}</span>',
-                unsafe_allow_html=True,
-            )
+            st.caption(f"{artigo['categoria']} · {artigo['resumo']}")
             if artigo["tags"]:
-                tags_html = "".join(f'<span class="artigo-tag">{t}</span>' for t in artigo["tags"][:8])
-                st.markdown(tags_html, unsafe_allow_html=True)
+                st.caption(" · ".join(artigo["tags"][:8]))
+
+
             _renderizar_secoes_artigo(artigo["corpo"])
 
 
 def tela_usuario(usuario):
+    if not usuario_tem_permissao(usuario["id"], "chamados.visualizar_proprios"):
+        st.error("Você não tem permissão para acessar o portal.")
+        return
     injetar_css()
     cabecalho("Central de Chamados", f"Bem-vindo(a), {usuario['nome']}", "🎫")
+    chamados_resolvidos = [
+        chamado for chamado in listar_chamados(
+            limite=50, usuario_id=usuario["id"], executor_id=usuario["id"],
+        ) if chamado["status"] == "Resolvido"
+    ]
+    if chamados_resolvidos:
+        numeros = ", ".join(f"#{chamado['id']}" for chamado in chamados_resolvidos[:4])
+        complemento = "" if len(chamados_resolvidos) <= 4 else "…"
+        st.warning(
+            f"🔔 Você tem {len(chamados_resolvidos)} chamado(s) resolvido(s) aguardando sua confirmação: "
+            f"{numeros}{complemento}. Acesse **Meus chamados ativos** para fechar ou solicitar reabertura."
+        )
 
-    opcoes_navegacao = [
-        "Central de ajuda",
-        "Abrir novo chamado",
+    pode_usar_ia = usuario_tem_permissao(usuario["id"], "ia.utilizar")
+    pode_ver_conhecimento = usuario_tem_permissao(usuario["id"], "conhecimento.visualizar")
+    opcoes_navegacao = []
+    if pode_ver_conhecimento or pode_usar_ia:
+        opcoes_navegacao.append("Central de ajuda")
+    if pode_usar_ia:
+        opcoes_navegacao.append("Abrir novo chamado")
+    opcoes_navegacao += [
         "Meus chamados ativos",
         "Meus chamados fechados",
         "Meus chamados cancelados",
@@ -1357,13 +537,15 @@ def tela_usuario(usuario):
     if st.session_state.get("usuario_nav") not in opcoes_navegacao:
         st.session_state.usuario_nav = opcoes_navegacao[0]
     with st.sidebar:
-        st.markdown('<div class="sidebar-section">Portal do usuário</div>', unsafe_allow_html=True)
+        st.caption("Portal do usuário")
         navegacao = st.radio(
             "Seções do portal", opcoes_navegacao, key="usuario_nav", label_visibility="collapsed",
         )
 
     if navegacao == "Central de ajuda":
-        _aba_portal_conhecimento()
+        boas_vindas(pode_usar_ia)
+        if pode_ver_conhecimento:
+            _aba_portal_conhecimento()
     elif navegacao == "Abrir novo chamado":
         _aba_abrir_chamado(usuario)
     elif navegacao == "Meus chamados ativos":
@@ -1375,12 +557,16 @@ def tela_usuario(usuario):
 
 
 def _aba_abrir_chamado(usuario):
+    if not usuario_tem_permissao(usuario["id"], "ia.utilizar"):
+        st.error("Você não tem permissão para usar o assistente.")
+        return
     if "chat_mensagens" not in st.session_state:
         st.session_state.chat_mensagens = [
             {"role": "assistant", "content": "Olá! Como posso ajudar? Você pode tirar uma dúvida ou descrever um problema."}
         ]
     if "chat_resultado_final" not in st.session_state:
         st.session_state.chat_resultado_final = None
+    contexto_conversa(st.session_state.chat_resultado_final)
 
     def reiniciar_conversa():
         st.session_state.chat_mensagens = [
@@ -1449,7 +635,7 @@ def _aba_abrir_chamado(usuario):
         else:
             resultado = st.session_state.chat_resultado_final
             if resultado.get("status") == "solucao_sugerida":
-                st.success("Encontrei uma possível solução com base nos dados informados.")
+                st.info("Encontrei uma possível solução com base nos dados informados.")
                 st.markdown("##### Solução sugerida")
                 st.markdown(resultado["solucao"])
                 if resultado.get("fontes"):
@@ -1467,9 +653,9 @@ def _aba_abrir_chamado(usuario):
 
                 col_resolvido, col_abrir = st.columns(2)
                 with col_resolvido:
-                    resolvido = st.button("A solução resolveu o problema", type="primary", use_container_width=True)
+                    resolvido = st.button("A solução resolveu o problema", type="primary", width="stretch")
                 with col_abrir:
-                    abrir_chamado = st.button("Não resolveu — abrir chamado", use_container_width=True)
+                    abrir_chamado = st.button("Não resolveu — abrir chamado", width="stretch")
 
                 if resolvido:
                     registrar_resultado_atendimento_ia(resultado["atendimento_ia_id"], "Resolvido", usuario_id=usuario["id"])
@@ -1489,6 +675,9 @@ def _aba_abrir_chamado(usuario):
                     st.rerun()
 
             elif resultado.get("status") == "aguardando_confirmacao":
+                if not usuario_tem_permissao(usuario["id"], "chamados.abrir"):
+                    st.info("Seu perfil permite consultar o assistente, mas não abrir chamados. Solicite acesso à administração.")
+                    return
                 st.info("Confira ou ajuste os dados. O chamado só será aberto após sua confirmação.")
                 with st.form("form_confirmar_abertura"):
                     titulo = st.text_input("Título", value=resultado["titulo"], max_chars=255)
@@ -1497,7 +686,7 @@ def _aba_abrir_chamado(usuario):
 
                 _, col_nova = st.columns(2)
                 with col_nova:
-                    nova_conversa = st.button("Iniciar nova conversa", use_container_width=True)
+                    nova_conversa = st.button("Iniciar nova conversa", width="stretch")
 
                 if confirmar:
                     if not titulo.strip() or not descricao.strip():
@@ -1531,18 +720,12 @@ def _aba_abrir_chamado(usuario):
 
             elif resultado.get("status") == "registrado":
                 st.success(f"Chamado #{resultado['id']} registrado com sucesso!")
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Categoria", resultado.get("categoria", "N/A"))
-                    st.metric("Urgência", resultado.get("urgencia", "N/A"))
-                    st.metric("Equipe destino", resultado.get("equipe_destino", "N/A"))
-                with col2:
-                    st.metric("SLA de resposta", resultado.get("tempo_sla_resposta", "N/A"))
-                    st.metric("SLA de resolução", resultado.get("tempo_sla_resolucao", "N/A"))
-                    st.metric("Confiabilidade (IA)", resultado.get("confiabilidade", "N/A"))
-
-                if st.button("Iniciar nova conversa", type="primary"):
+                st.write(f"**Equipe responsável:** {resultado.get('equipe_destino') or 'A definir'}")
+                st.caption(f"Categoria: {resultado.get('categoria') or 'Não informada'} · Urgência: {resultado.get('urgencia') or 'Não informada'}")
+                st.caption("Consulte os prazos vigentes e as próximas atualizações no acompanhamento do chamado.")
+                st.button("Acompanhar meu chamado", type="primary", on_click=acompanhar_chamado,
+                          args=(resultado["id"],), width="stretch")
+                if st.button("Iniciar nova conversa"):
                     reiniciar_conversa()
                     st.rerun()
 
@@ -1571,16 +754,20 @@ def _aba_meus_chamados(usuario, grupo):
         chamados = [c for c in chamados if c["status"] == "Cancelado"]
         titulo_grupo = "cancelado(s)"
 
+    busca = st.text_input("Buscar em meus chamados", placeholder="Número ou título", key=f"busca_meus_{grupo}").strip().casefold().lstrip("#")
+    if busca:
+        chamados = [c for c in chamados if busca in f"{c['id']} {c['titulo']}".casefold()]
     if not chamados:
         st.info(f"Você não possui chamados {titulo_grupo}.")
         return
 
     st.caption(f"{len(chamados)} chamado(s) {titulo_grupo} — clique em um para ver detalhes.")
 
-    lista_col, detalhe_col = st.columns([1, 1.6])
+    lista_col = st.expander("Lista de chamados · selecione para ver detalhes", expanded=st.session_state.chamado_aberto_usuario is None)
+    detalhe_col = st.container()
 
     with lista_col:
-        for c in chamados:
+        for c in paginar_registros(chamados, f"pagina_meus_{grupo}"):
             selecionado = st.session_state.chamado_aberto_usuario == c["id"]
             estado_sla = sla.status_sla(c)
             contexto = f"Responsável: {c.get('nome_analista') or 'Aguardando atribuição'}"
@@ -1591,7 +778,7 @@ def _aba_meus_chamados(usuario, grupo):
     with detalhe_col:
         chamado_id_sel = st.session_state.chamado_aberto_usuario
         if chamado_id_sel is None:
-            st.info("Selecione um chamado na lista ao lado.")
+            st.info("Selecione um chamado na lista acima.")
             return
 
         chamado = buscar_chamado_por_id(chamado_id_sel, usuario["id"])
@@ -1609,24 +796,19 @@ def _aba_meus_chamados(usuario, grupo):
 
         with st.container(border=True):
             st.markdown(f"#### #{chamado['id']} — {chamado['titulo']}")
-            st.markdown(f"{badge_status(chamado['status'])} {badge_urgencia(chamado['urgencia'])}", unsafe_allow_html=True)
+            exibir_status_chamado(chamado["status"])
+            st.caption(f"Urgência: {rotulo(chamado['urgencia'])}")
             st.write(chamado["descricao"])
 
-            st.markdown(painel_metricas_chamado(chamado), unsafe_allow_html=True)
-            st.markdown(f'<span class="sla-pill">👥 Equipe: {chamado.get("equipe_destino") or "—"}</span>', unsafe_allow_html=True)
+            st.markdown(painel_metricas_chamado(chamado))
+            st.caption(f"Equipe: {chamado.get('equipe_destino') or '—'}")
             bloco_sla_detalhe(chamado, sla.status_sla(chamado))
             st.caption(f"Analista responsável: {chamado.get('nome_analista') or 'Aguardando atribuição'}")
             st.info(f"**Status atual:** {chamado['status']}. {_quem_precisa_agir(chamado)}")
             if chamado["status"] == "Cancelado":
                 st.warning(f"Cancelado: {chamado.get('motivo_cancelamento') or 'Não informado'}. O registro permanece disponível apenas para consulta e auditoria.")
 
-        linha_do_tempo_chamado(chamado, usuario["id"])
-
-        st.markdown("##### Conversa com o analista")
-        painel_conversa_chamado(chamado, usuario, "usuario", key_prefix="usr")
-        painel_anexos_chamado(chamado, usuario, key_prefix="usr")
-
-        if chamado["status"] == "Novo" and chamado.get("analista_id") is None:
+        if chamado["status"] == "Novo" and chamado.get("analista_id") is None and usuario_tem_permissao(usuario["id"], "chamados.cancelar_proprios"):
             st.divider()
             chave_formulario = f"mostrar_cancelamento_{chamado['id']}"
             if not st.session_state.get(chave_formulario):
@@ -1647,12 +829,11 @@ def _aba_meus_chamados(usuario, grupo):
                     try:
                         cancelar_chamado_sem_atribuicao(chamado["id"], motivo, autor_id=usuario["id"])
                         st.session_state[chave_formulario] = False
-                        st.success("Chamado cancelado. Ele não será encaminhado para atendimento e ficará disponível apenas para consulta e auditoria.")
+                        recarregar_com_feedback('Chamado cancelado. Ele não será encaminhado para atendimento e ficará disponível apenas para consulta e auditoria.')
                     except ValueError as erro:
                         st.error(str(erro))
-                    st.rerun()
 
-        elif chamado["status"] == "Resolvido":
+        elif chamado["status"] == "Resolvido" and usuario_tem_permissao(usuario["id"], "chamados.confirmar_resolucao"):
             st.divider()
             st.info("O analista marcou este chamado como resolvido. Confirme o resultado ou solicite a reabertura.")
             if chamado.get("diagnostico_final"):
@@ -1664,25 +845,33 @@ def _aba_meus_chamados(usuario, grupo):
             if confirmar_solucao:
                 try:
                     confirmar_resolucao_usuario(chamado["id"], usuario["id"])
-                    st.success("Solução confirmada. Chamado fechado.")
+                    recarregar_com_feedback('Solução confirmada. Chamado fechado.')
                 except ValueError as erro:
                     st.error(str(erro))
-                st.rerun()
             with st.form(f"form_reabrir_{chamado['id']}"):
                 motivo_reabertura = st.text_area("Motivo da reabertura", max_chars=500)
                 reabrir = st.form_submit_button("Solicitar reabertura")
             if reabrir:
                 try:
                     reabrir_chamado_usuario(chamado["id"], usuario["id"], motivo_reabertura)
-                    st.success("Chamado reaberto e devolvido para atendimento.")
+                    recarregar_com_feedback('Chamado reaberto e devolvido para atendimento.')
                 except ValueError as erro:
                     st.error(str(erro))
-                st.rerun()
 
+        conversa, arquivos, historico = st.tabs(["Conversa", "Anexos", "Histórico"])
+        with conversa:
+            painel_conversa_chamado(chamado, usuario, "usuario", key_prefix="usr")
+        with arquivos:
+            painel_anexos_chamado(chamado, usuario, key_prefix="usr")
+        with historico:
+            linha_do_tempo_chamado(chamado, usuario["id"])
         painel_pesquisa_satisfacao(chamado, usuario)
 
 
 def tela_analista(usuario):
+    if not usuario_tem_permissao(usuario["id"], "chamados.visualizar_fila"):
+        st.error("Você não tem permissão para acessar a fila de atendimento.")
+        return
     injetar_css()
     cabecalho("Central de Serviços — Analista", f"{usuario['nome']} · Gestão de Incidentes")
 
@@ -1692,7 +881,7 @@ def tela_analista(usuario):
     if st.session_state.get("analista_nav") not in opcoes_navegacao:
         st.session_state.analista_nav = opcoes_navegacao[0]
     with st.sidebar:
-        st.markdown('<div class="sidebar-section">Atendimento</div>', unsafe_allow_html=True)
+        st.caption("Atendimento")
         navegacao = st.radio(
             "Seções de atendimento", opcoes_navegacao, key="analista_nav", label_visibility="collapsed",
         )
@@ -1716,80 +905,36 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
     em_andamento = sum(1 for c in chamados if c["status"] == "Em Andamento")
     meus = sum(1 for c in chamados if c.get("analista_id") == usuario["id"])
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Chamados ativos", total)
-    m2.metric("Novos", novos)
-    m3.metric("Em andamento", em_andamento)
-    m4.metric("Atribuídos a mim", meus)
-
-    st.divider()
-
-    with st.container(border=True):
-        st.markdown("##### Filtros da fila")
-        busca_col, status_col, urgencia_col = st.columns([2, 1, 1])
-        with busca_col:
-            busca_textual = st.text_input(
-                "Buscar chamado",
-                placeholder="Título, descrição ou solicitante",
-                key="busca_chamado_ativa",
-            ).strip().lower()
-        with status_col:
-            filtro_status = st.multiselect("Status", options=STATUS_OPCOES, default=[], key="filtro_status_ativa")
-        with urgencia_col:
-            filtro_urgencia = st.multiselect(
-                "Urgência", options=["Critica", "Alta", "Media", "Baixa"], default=[], key="filtro_urgencia_ativa",
-            )
-
-        categoria_col, departamento_col, analista_col, sla_col, responsavel_col = st.columns(5)
-        with categoria_col:
-            categorias_fila = ["Todas"] + sorted({c.get("categoria") or "Outros" for c in chamados})
-            filtro_categoria = st.selectbox("Categoria", categorias_fila, key="filtro_categoria_ativa")
-        with departamento_col:
-            departamentos_fila = ["Todos"] + sorted({c.get("departamento_usuario") or "Não informado" for c in chamados})
-            filtro_departamento = st.selectbox("Departamento", departamentos_fila, key="filtro_departamento_ativa")
-        with analista_col:
-            analistas_fila = ["Todos"] + sorted({c.get("nome_analista") or "Sem atribuição" for c in chamados})
-            filtro_analista = st.selectbox("Analista", analistas_fila, key="filtro_analista_ativa")
-        with sla_col:
-            filtro_sla = st.multiselect(
-                "Situação de SLA", ["Violado", "Em risco", "Dentro do prazo", "Pausado"], key="filtro_sla_ativa",
-            )
-        with responsavel_col:
-            st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
-            somente_meus = st.checkbox("Atribuídos a mim", key="somente_meus_ativa")
-
-    chamados_filtrados = chamados
-    if filtro_status:
-        chamados_filtrados = [c for c in chamados_filtrados if c["status"] in filtro_status]
-    if filtro_urgencia:
-        chamados_filtrados = [c for c in chamados_filtrados if c["urgencia"] in filtro_urgencia]
-    if somente_meus:
-        chamados_filtrados = [c for c in chamados_filtrados if c.get("analista_id") == usuario["id"]]
-    if filtro_sla:
-        chamados_filtrados = [c for c in chamados_filtrados if sla.pior_status(sla.status_sla(c)) in filtro_sla]
-    if filtro_categoria != "Todas":
-        chamados_filtrados = [c for c in chamados_filtrados if c.get("categoria") == filtro_categoria]
-    if filtro_departamento != "Todos":
-        chamados_filtrados = [c for c in chamados_filtrados if (c.get("departamento_usuario") or "Não informado") == filtro_departamento]
-    if filtro_analista != "Todos":
-        chamados_filtrados = [c for c in chamados_filtrados if (c.get("nome_analista") or "Sem atribuição") == filtro_analista]
-    if busca_textual:
-        chamados_filtrados = [c for c in chamados_filtrados if busca_textual in " ".join(str(c.get(campo) or "") for campo in ("titulo", "descricao", "nome_usuario")).lower()]
+    indicadores([
+        ("Chamados ativos", total, "Recorte carregado: todos exceto fechados e cancelados."),
+        ("Novos", novos, "Chamados do recorte ainda no estado Novo."),
+        ("Em andamento", em_andamento, "Chamados do recorte no estado Em Andamento."),
+        ("Atribuídos a mim", meus, "Ativos do recorte sob sua responsabilidade."),
+    ])
+    st.caption("Fila carregada: até 200 registros mais recentes. Ordenação por situação de SLA, urgência e abertura.")
+    # Migra apenas valores que não pertencem à fila ativa antes de criar o widget.
+    if "filtro_status_ativa" in st.session_state:
+        st.session_state.filtro_status_ativa = [valor for valor in st.session_state.filtro_status_ativa
+                                               if valor in {"Novo", "Em Andamento", "Em Espera", "Resolvido"}]
+    filtros = filtros_fila(chamados)
+    chamados_filtrados = filtrar_fila(chamados, filtros, usuario["id"])
+    if resumo_filtros(filtros):
+        st.caption("Filtros ativos: " + resumo_filtros(filtros))
 
     st.caption(f"{len(chamados_filtrados)} de {len(chamados)} chamado(s) exibido(s).")
 
-    fila_col, detalhe_col = st.columns([1, 1.6])
+    fila_col, detalhe_col = st.columns([1, 1.8], gap="large")
 
     with fila_col:
         st.markdown("##### Fila de chamados")
         if not chamados_filtrados:
             st.caption("Nenhum chamado com os filtros selecionados.")
-        for c in chamados_filtrados:
+        for c in paginar_registros(chamados_filtrados, "pagina_fila_ativa"):
             selecionado = st.session_state.chamado_selecionado_analista == c["id"]
             estado_sla = sla.status_sla(c)
             responsavel = c.get("nome_analista") or "Sem atribuição"
             contexto = f"Solicitante: {c.get('nome_usuario') or '—'} · Responsável: {responsavel}"
-            if exibir_cartao_chamado(c, estado_sla, contexto, selecionado, f"sel_{c['id']}"):
+            if cartao_fila_compacto(c, estado_sla, contexto, selecionado, f"sel_{c['id']}"):
                 st.session_state.chamado_selecionado_analista = c["id"]
                 st.rerun()
 
@@ -1797,6 +942,9 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
         chamado_id_sel = st.session_state.chamado_selecionado_analista
         if chamado_id_sel is None:
             st.info("Selecione um chamado na fila para atender.")
+            return
+        if chamado_id_sel not in {c["id"] for c in chamados_filtrados}:
+            st.info("Selecione um chamado nos resultados atuais. A seleção anterior está fora dos filtros aplicados.")
             return
 
         chamado = buscar_chamado_por_id(chamado_id_sel, usuario["id"])
@@ -1809,18 +957,19 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
             topo_esq, topo_dir = st.columns([3, 1])
             with topo_esq:
                 st.markdown(f"#### #{chamado['id']} — {chamado['titulo']}")
-                st.caption(f"Status: {chamado['status']} · Urgência: {chamado['urgencia']}")
+                exibir_status_chamado(chamado["status"])
+                st.caption(f"Urgência: {rotulo(chamado['urgencia'])}")
             with topo_dir:
                 analista_atribuido = chamado.get("analista_id")
                 ja_atribuido_a_mim = analista_atribuido == usuario["id"]
-                if analista_atribuido is None:
-                    if st.button("Atender chamado", type="primary", use_container_width=True):
+                if analista_atribuido is None and chamado["status"] == "Novo":
+                    if usuario_tem_permissao(usuario["id"], "chamados.assumir") and st.button("Assumir chamado", type="primary", width="stretch"):
                         try:
                             atribuir_chamado(chamado["id"], usuario["id"])
+                            recarregar_com_feedback("Chamado atribuído a você. Envie a primeira resposta ao solicitante.")
                         except ValueError as erro:
                             st.error(str(erro))
-                        st.rerun()
-                    if st.button("Cancelar chamado", key=f"cancelar_analista_{chamado['id']}", use_container_width=True):
+                    if usuario_tem_permissao(usuario["id"], "chamados.cancelar_fila") and st.button("Cancelar chamado", key=f"cancelar_analista_{chamado['id']}", width="stretch"):
                         st.session_state[f"mostrar_cancelamento_analista_{chamado['id']}"] = True
                         st.rerun()
                 else:
@@ -1831,16 +980,14 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
 
             st.write(chamado["descricao"])
 
-            st.markdown(painel_metricas_chamado(chamado), unsafe_allow_html=True)
-
-            categoria_col, equipe_col, ia_col = st.columns(3)
-            categoria_col.caption(f"Categoria: {chamado.get('categoria') or '—'}")
-            equipe_col.caption(f"Equipe: {chamado.get('equipe_destino') or '—'}")
-            ia_col.caption(f"Confiança da IA: {chamado.get('confiabilidade') or '—'}")
-            bloco_sla_detalhe(chamado, sla.status_sla(chamado))
+            estado_sla = sla.status_sla(chamado)
+            indicadores_destaque_chamado(chamado, estado_sla)
+            bloco_sla_detalhe(chamado, estado_sla)
+            with st.expander("Informações da classificação assistida"):
+                st.write(f"Confiança informada pela IA: {chamado.get('confiabilidade') or 'Não informada'}")
             st.caption(f"Solicitante: {chamado.get('nome_usuario') or '-'} · Aberto em {chamado.get('criado_em').strftime('%d/%m/%Y %H:%M:%S')}")
 
-            if ja_atribuido_a_mim and chamado["status"] == "Em Andamento" and not chamado.get("primeira_resposta_em"):
+            if ja_atribuido_a_mim and chamado["status"] == "Em Andamento" and not chamado.get("primeira_resposta_em") and usuario_tem_permissao(usuario["id"], "chamados.responder_atribuidos"):
                 st.warning("A primeira resposta ainda não foi registrada. Ela é obrigatória antes de resolver o chamado e inicia o indicador de atendimento.")
                 with st.form(f"form_primeira_resposta_{chamado['id']}"):
                     primeira_resposta = st.text_area("Primeira resposta ao solicitante", placeholder="Confirme que está analisando e informe o próximo passo.", max_chars=4000)
@@ -1850,73 +997,73 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
                         st.error("Escreva uma mensagem antes de enviar.")
                     else:
                         enviar_mensagem_chamado(chamado["id"], usuario["id"], usuario["nome"], "analista", primeira_resposta.strip())
-                        st.success("Primeira resposta registrada e enviada ao solicitante.")
-                        st.rerun()
+                        recarregar_com_feedback('Primeira resposta registrada e enviada ao solicitante.')
 
             if (
                 ja_atribuido_a_mim
+                and usuario_tem_permissao(usuario["id"], "chamados.registrar_resolucao")
                 and chamado["status"] in ("Em Andamento", "Em Espera")
                 and chamado.get("primeira_resposta_em")
             ):
                 st.divider()
                 st.caption("A primeira resposta foi registrada. Você pode continuar a conversa ou registrar a resolução para que o solicitante confirme o resultado. A aprovação para a base interna da IA é uma decisão separada e opcional.")
-                with st.form(f"form_resolucao_{chamado['id']}"):
-                    st.markdown("##### Classificação final")
-                    st.caption(
-                        "Sugestão da IA: "
-                        f"{chamado.get('categoria_ia') or chamado.get('categoria') or '—'} · "
-                        f"{chamado.get('urgencia_ia') or chamado.get('urgencia') or '—'} · "
-                        f"{chamado.get('equipe_ia') or chamado.get('equipe_destino') or '—'}"
-                    )
-                    coluna_categoria, coluna_urgencia, coluna_equipe = st.columns(3)
-                    categorias = ["Acesso", "Software", "Hardware", "Rede", "Outros"]
-                    urgencias = ["Baixa", "Media", "Alta", "Critica"]
-                    equipes = ["Suporte", "Software", "Hardware", "Redes"]
-                    with coluna_categoria:
-                        categoria_final = st.selectbox(
-                            "Categoria final", categorias,
-                            index=categorias.index(chamado.get("categoria_ia") or chamado.get("categoria") or "Outros"),
+                with st.expander("Registrar diagnóstico e solução", expanded=False):
+                    with st.form(f"form_resolucao_{chamado['id']}"):
+                        st.markdown("##### Classificação final")
+                        st.caption(
+                            "Sugestão da IA: "
+                            f"{chamado.get('categoria_ia') or chamado.get('categoria') or '—'} · "
+                            f"{chamado.get('urgencia_ia') or chamado.get('urgencia') or '—'} · "
+                            f"{chamado.get('equipe_ia') or chamado.get('equipe_destino') or '—'}"
                         )
-                    with coluna_urgencia:
-                        urgencia_final = st.selectbox(
-                            "Urgência final", urgencias,
-                            index=urgencias.index(chamado.get("urgencia_ia") or chamado.get("urgencia") or "Media"),
+                        coluna_categoria, coluna_urgencia, coluna_equipe = st.columns(3)
+                        categorias = ["Acesso", "Software", "Hardware", "Rede", "Outros"]
+                        urgencias = ["Baixa", "Media", "Alta", "Critica"]
+                        equipes = ["Suporte", "Software", "Hardware", "Redes"]
+                        with coluna_categoria:
+                            categoria_final = st.selectbox(
+                                "Categoria final", categorias,
+                                index=categorias.index(chamado.get("categoria_ia") or chamado.get("categoria") or "Outros"),
+                            )
+                        with coluna_urgencia:
+                            urgencia_final = st.selectbox(
+                                "Urgência final", urgencias,
+                                index=urgencias.index(chamado.get("urgencia_ia") or chamado.get("urgencia") or "Media"),
+                            )
+                        with coluna_equipe:
+                            equipe_final = st.selectbox(
+                                "Equipe final", equipes,
+                                index=equipes.index(chamado.get("equipe_ia") or chamado.get("equipe_destino") or "Suporte"),
+                            )
+                        diagnostico = st.text_area(
+                            "Diagnóstico identificado", height=75,
+                            placeholder="Ex.: A senha da conta havia expirado.",
                         )
-                    with coluna_equipe:
-                        equipe_final = st.selectbox(
-                            "Equipe final", equipes,
-                            index=equipes.index(chamado.get("equipe_ia") or chamado.get("equipe_destino") or "Suporte"),
+                        solucao = st.text_area(
+                            "Solução aplicada", height=90,
+                            placeholder="Ex.: Senha redefinida e Outlook reconfigurado.",
                         )
-                    diagnostico = st.text_area(
-                        "Diagnóstico identificado", height=75,
-                        placeholder="Ex.: A senha da conta havia expirado.",
-                    )
-                    solucao = st.text_area(
-                        "Solução aplicada", height=90,
-                        placeholder="Ex.: Senha redefinida e Outlook reconfigurado.",
-                    )
-                    compartilhar = st.checkbox(
-                        "Aprovar este caso como referência interna para a IA",
-                        value=False,
-                        help="Opcional. A decisão é exclusiva do analista responsável; o conteúdo é anonimizado e não é exibido aos solicitantes.",
-                    )
-                    marcar_resolvido = st.form_submit_button("Registrar resolução", type="primary", use_container_width=True)
+                        compartilhar = st.checkbox(
+                            "Aprovar este caso como referência interna para a IA",
+                            value=False,
+                            help="Opcional. A decisão é exclusiva do analista responsável; o conteúdo é anonimizado e não é exibido aos solicitantes.",
+                        )
+                        marcar_resolvido = st.form_submit_button("Registrar resolução", type="primary", width="stretch")
                 if marcar_resolvido:
                     try:
                         registrar_resolucao_chamado(
                             chamado["id"], usuario["id"], diagnostico, solucao, compartilhar,
                             categoria_final, urgencia_final, equipe_final,
                         )
-                        st.success("Resolução registrada. O solicitante poderá confirmar ou solicitar reabertura.")
+                        recarregar_com_feedback('Resolução registrada. O solicitante poderá confirmar ou solicitar reabertura.')
                     except ValueError as erro:
                         st.error(str(erro))
-                    st.rerun()
             elif ja_atribuido_a_mim and chamado["status"] == "Em Espera":
                 st.info("Aguardando a resposta do solicitante. Você ainda pode enviar mensagens ou registrar a resolução, se o atendimento já estiver concluído.")
             elif ja_atribuido_a_mim and chamado["status"] == "Resolvido":
                 st.info("Aguardando a confirmação do solicitante para fechar ou reabrir o chamado.")
 
-            if ja_atribuido_a_mim and chamado["status"] not in STATUS_ENCERRADOS:
+            if ja_atribuido_a_mim and chamado["status"] not in STATUS_ENCERRADOS and usuario_tem_permissao(usuario["id"], "chamados.alterar_status"):
                 with st.expander("Transferir ou escalar chamado"):
                     analistas = [item for item in listar_analistas_para_transferencia(usuario["id"]) if item["id"] != usuario["id"]]
                     if analistas:
@@ -1928,7 +1075,7 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
                         if transferir:
                             try:
                                 transferir_chamado(chamado["id"], novo_analista, motivo_transferencia, usuario["id"])
-                                st.success("Chamado transferido."); st.rerun()
+                                recarregar_com_feedback('Chamado transferido.')
                             except (ValueError, PermissionError) as erro:
                                 st.error(str(erro))
                     with st.form(f"form_escalar_{chamado['id']}"):
@@ -1939,12 +1086,12 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
                     if escalar:
                         try:
                             escalar_chamado(chamado["id"], nova_urgencia, nova_equipe, motivo_escalonamento, usuario["id"])
-                            st.success("Chamado escalado."); st.rerun()
+                            recarregar_com_feedback('Chamado escalado.')
                         except (ValueError, PermissionError) as erro:
                             st.error(str(erro))
 
         chave_cancelamento_analista = f"mostrar_cancelamento_analista_{chamado['id']}"
-        if chamado.get("analista_id") is None and st.session_state.get(chave_cancelamento_analista):
+        if chamado.get("analista_id") is None and chamado["status"] == "Novo" and usuario_tem_permissao(usuario["id"], "chamados.cancelar_fila") and st.session_state.get(chave_cancelamento_analista):
             with st.form(f"form_cancelar_analista_{chamado['id']}"):
                 st.warning("O chamado será cancelado sem ser atribuído e mantido para auditoria.")
                 motivo_analista = st.selectbox(
@@ -1962,21 +1109,21 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
                 try:
                     cancelar_chamado_sem_atribuicao(chamado["id"], motivo_analista, autor_id=usuario["id"])
                     st.session_state[chave_cancelamento_analista] = False
-                    st.success("Chamado cancelado.")
+                    recarregar_com_feedback('Chamado cancelado.')
                 except ValueError as erro:
                     st.error(str(erro))
-                st.rerun()
 
         if chamado.get("analista_id") != usuario["id"]:
             st.info("Atribua este chamado a você para enviar mensagens, anexos ou executar ações de atendimento.")
             return
 
-        st.markdown("##### Conversa com o solicitante")
-        painel_conversa_chamado(chamado, usuario, "analista", key_prefix="ana")
-        painel_anexos_chamado(chamado, usuario, key_prefix="ana")
-        with st.expander("Histórico operacional"):
-            for evento in listar_historico_chamado(chamado["id"], usuario["id"]):
-                st.caption(f"{evento['criado_em'].strftime('%d/%m/%Y %H:%M')} · {evento['tipo']} · {evento.get('autor_nome') or 'Sistema'}")
+        conversa, arquivos, historico = st.tabs(["Conversa", "Anexos", "Histórico"])
+        with conversa:
+            painel_conversa_chamado(chamado, usuario, "analista", key_prefix="ana")
+        with arquivos:
+            painel_anexos_chamado(chamado, usuario, key_prefix="ana")
+        with historico:
+            linha_do_tempo_chamado(chamado, usuario["id"])
 
 
 def _aba_historico_analista(usuario, chamados_todos):
@@ -2018,13 +1165,18 @@ def _aba_historico_analista(usuario, chamados_todos):
     if somente_meus_hist:
         chamados_filtrados = [c for c in chamados_filtrados if c.get("analista_id") == usuario["id"]]
 
-    lista_col, detalhe_col = st.columns([1, 1.6])
+    busca = st.text_input("Buscar chamado", placeholder="Número, título ou solicitante", key="busca_historico").strip().casefold().lstrip("#")
+    if busca:
+        chamados_filtrados = [c for c in chamados_filtrados if busca in f"{c['id']} {c['titulo']} {c.get('nome_usuario') or ''}".casefold()]
+
+    lista_col = st.expander("Chamados fechados", expanded=st.session_state.get("chamado_selecionado_historico") is None)
+    detalhe_col = st.container()
 
     with lista_col:
         st.markdown("##### Registros encerrados")
         if not chamados_filtrados:
             st.caption("Nenhum chamado fechado com os filtros selecionados.")
-        for c in chamados_filtrados:
+        for c in paginar_registros(chamados_filtrados, "pagina_historico"):
             estado_sla = sla.status_sla(c)
             selecionado = st.session_state.get("chamado_selecionado_historico") == c["id"]
             contexto = f"Solicitante: {c.get('nome_usuario') or '—'} · Responsável: {c.get('nome_analista') or '—'}"
@@ -2046,17 +1198,13 @@ def _aba_historico_analista(usuario, chamados_todos):
 
         with st.container(border=True):
             st.markdown(f"#### #{chamado['id']} — {chamado['titulo']}")
-            st.markdown(f"{badge_status(chamado['status'])} {badge_urgencia(chamado['urgencia'])}", unsafe_allow_html=True)
+            exibir_status_chamado(chamado["status"])
+            st.caption(f"Urgência: {rotulo(chamado['urgencia'])}")
             st.write(chamado["descricao"])
 
-            st.markdown(painel_metricas_chamado(chamado), unsafe_allow_html=True)
+            st.markdown(painel_metricas_chamado(chamado))
 
-            st.markdown(
-                f'<span class="sla-pill"> {chamado.get("categoria") or "—"}</span>'
-                f'<span class="sla-pill"> Equipe: {chamado.get("equipe_destino") or "—"}</span>'
-                f'<span class="sla-pill"> Confiabilidade IA: {chamado.get("confiabilidade") or "—"}</span>',
-                unsafe_allow_html=True,
-            )
+            st.caption(f"Categoria: {chamado.get('categoria') or '—'} · Confiança da classificação: {chamado.get('confiabilidade') or '—'}")
             bloco_sla_detalhe(chamado, sla.status_sla(chamado))
 
             st.caption(
@@ -2090,10 +1238,15 @@ def _aba_cancelados_analista(usuario, chamados_todos):
     st.metric("Total cancelados", len(chamados))
     st.caption("Cancelamentos são mantidos para auditoria e não impactam a taxa de cumprimento de SLA.")
 
-    lista_col, detalhe_col = st.columns([1, 1.6])
+    busca = st.text_input("Buscar chamado", placeholder="Número, título ou solicitante", key="busca_cancelados").strip().casefold().lstrip("#")
+    if busca:
+        chamados = [c for c in chamados if busca in f"{c['id']} {c['titulo']} {c.get('nome_usuario') or ''}".casefold()]
+
+    lista_col = st.expander("Chamados cancelados", expanded=st.session_state.chamado_selecionado_cancelado is None)
+    detalhe_col = st.container()
     with lista_col:
         st.markdown("##### Chamados cancelados")
-        for c in chamados:
+        for c in paginar_registros(chamados, "pagina_cancelados"):
             selecionado = st.session_state.chamado_selecionado_cancelado == c["id"]
             estado_sla = sla.status_sla(c)
             contexto = f"Solicitante: {c.get('nome_usuario') or '—'} · Responsável: {c.get('nome_analista') or 'Sem atribuição'}"
@@ -2114,9 +1267,10 @@ def _aba_cancelados_analista(usuario, chamados_todos):
 
         with st.container(border=True):
             st.markdown(f"#### #{chamado['id']} — {chamado['titulo']}")
-            st.markdown(f"{badge_status(chamado['status'])} {badge_urgencia(chamado['urgencia'])}", unsafe_allow_html=True)
+            exibir_status_chamado(chamado["status"])
+            st.caption(f"Urgência: {rotulo(chamado['urgencia'])}")
             st.write(chamado["descricao"])
-            st.markdown(painel_metricas_chamado(chamado), unsafe_allow_html=True)
+            st.markdown(painel_metricas_chamado(chamado))
             st.caption(
                 f"Solicitante: {chamado.get('nome_usuario') or '—'} · "
                 "SLA: não aplicável (cancelado pelo usuário)."
@@ -2131,39 +1285,6 @@ def _aba_cancelados_analista(usuario, chamados_todos):
                 st.caption(f"{sla.formatar_data(evento['criado_em'])} · {evento['tipo'].replace('_', ' ').title()} · {evento.get('autor_nome') or 'Sistema'}")
 
 
-def _estilizar_grafico(figura, eixo):
-    """Preserva o estilo padrão do Matplotlib exibido pelo Streamlit."""
-    return
-
-
-def _exibir_grafico_barras(dados, titulo, eixo_x, eixo_y, cor="#5e9188"):
-    """Exibe um gráfico Matplotlib consistente e trata conjuntos de dados vazios."""
-    if dados.empty or eixo_x not in dados or eixo_y not in dados:
-        st.info("Ainda não há dados suficientes para este gráfico.")
-        return
-
-    dados = dados[[eixo_x, eixo_y]].copy()
-    dados[eixo_y] = pd.to_numeric(dados[eixo_y], errors="coerce").fillna(0)
-    if dados[eixo_y].sum() <= 0:
-        st.info("Ainda não há dados suficientes para este gráfico.")
-        return
-
-    figura, eixo = plt.subplots(figsize=(7, 3.4))
-    _estilizar_grafico(figura, eixo)
-    barras = eixo.bar(dados[eixo_x].astype(str), dados[eixo_y], color=cor)
-    eixo.set_title(titulo, loc="left", fontweight="bold")
-    eixo.set_xlabel("")
-    eixo.set_ylabel(eixo_y)
-    eixo.spines[["top", "right"]].set_visible(False)
-    eixo.tick_params(axis="x", rotation=20)
-    for barra in barras:
-        altura = barra.get_height()
-        eixo.annotate(f"{altura:.0f}", (barra.get_x() + barra.get_width() / 2, altura),
-                      ha="center", va="bottom", fontsize=9,
-                      color="#262730")
-    figura.tight_layout()
-    st.pyplot(figura, use_container_width=True)
-    plt.close(figura)
 
 
 def relatorio_usuarios(usuarios):
@@ -2181,65 +1302,105 @@ def relatorio_usuarios(usuarios):
 
     grafico, tabela = st.columns([1.4, 1])
     with grafico:
-        _exibir_grafico_barras(distribuicao, "Contas por perfil", "Perfil", "Quantidade", "#3e5954")
+        _exibir_grafico_barras(distribuicao, "Contas por perfil", "Perfil", "Quantidade")
     with tabela:
         exibir_tabela_tematica(distribuicao)
 
 
 def relatorio_sla_desempenho(chamados):
-    st.markdown("### Relatório de desempenho e cumprimento de SLA")
-    st.caption("Cancelados não entram no cálculo. O cumprimento considera chamados com a respectiva etapa concluída.")
+    st.markdown("### Prazos de atendimento (SLA)")
+    st.caption("Uma leitura rápida dos prazos prometidos para responder e resolver chamados. Cancelados não entram no cálculo.")
     dados = pd.DataFrame(chamados)
     if dados.empty:
         st.info("Ainda não há chamados para calcular os indicadores de SLA.")
         return
 
-    estados = dados["status"].value_counts()
-    operacionais = st.columns(5)
-    for coluna, status in zip(operacionais, ["Em Andamento", "Em Espera", "Resolvido", "Fechado", "Cancelado"]):
-        coluna.metric(status, int(estados.get(status, 0)))
-
+    chamados_para_lista = dados.copy()
     dados = dados[dados["status"] != "Cancelado"].copy()
     dados["SLA resposta"] = [sla.status_sla(c)["resposta"]["status"] for c in dados.to_dict("records")]
     dados["SLA resolução"] = [sla.status_sla(c)["resolucao"]["status"] for c in dados.to_dict("records")]
-    respostas_concluidas = dados[dados["primeira_resposta_em"].notna()]
     resolucoes_concluidas = dados[dados["resolvido_em"].notna()]
-    resposta_cumprida = int((respostas_concluidas["SLA resposta"] == "Cumprido").sum())
     resolucao_cumprida = int((resolucoes_concluidas["SLA resolução"] == "Cumprido").sum())
-    taxa_resposta = resposta_cumprida / len(respostas_concluidas) * 100 if len(respostas_concluidas) else 0
     taxa_resolucao = resolucao_cumprida / len(resolucoes_concluidas) * 100 if len(resolucoes_concluidas) else 0
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Chamados monitorados", len(dados))
-    c2.metric("Resposta no prazo", f"{taxa_resposta:.1f}%", f"{resposta_cumprida}/{len(respostas_concluidas)} concluídos")
-    c3.metric("Resolução no prazo", f"{taxa_resolucao:.1f}%", f"{resolucao_cumprida}/{len(resolucoes_concluidas)} concluídos")
-    c4.metric("SLA em violação", int((dados["SLA resolução"] == "Violado").sum()))
+    ativos = dados[~dados["status"].isin(STATUS_ENCERRADOS | {"Resolvido"})]
+    atrasados = int((ativos["SLA resolução"] == "Violado").sum())
+    em_risco = int((ativos["SLA resolução"] == "Em risco").sum())
+    em_espera = int((ativos["status"] == "Em Espera").sum())
 
-    ordem = ["Cumprido", "Dentro do prazo", "Em risco", "Violado", "Pausado"]
-    resumo = pd.DataFrame({
-        "Status": ordem,
-        "Resposta": dados["SLA resposta"].value_counts().reindex(ordem, fill_value=0).values,
-        "Resolução": dados["SLA resolução"].value_counts().reindex(ordem, fill_value=0).values,
+    c1, c2, c3 = st.columns(3)
+    c1.metric(
+        "Resoluções no prazo",
+        f"{taxa_resolucao:.0f}%" if len(resolucoes_concluidas) else "Sem resoluções",
+        f"{resolucao_cumprida} de {len(resolucoes_concluidas)} concluídas no prazo" if len(resolucoes_concluidas) else "Ainda não há chamados resolvidos",
+    )
+    c2.metric(
+        "Atenção agora", f"{atrasados + em_risco} chamado(s)",
+        f"{atrasados} atrasado(s) · {em_risco} perto do prazo",
+    )
+    c3.metric(
+        "Em atendimento", len(ativos),
+        f"{em_espera} aguardando retorno do solicitante",
+    )
+
+    if atrasados:
+        st.error(f"Prioridade: há {atrasados} chamado(s) com prazo de resolução vencido.")
+    elif em_risco:
+        st.warning(f"Atenção: {em_risco} chamado(s) está(ão) próximo(s) do prazo de resolução.")
+    else:
+        st.success("Os chamados em atendimento estão dentro dos prazos configurados.")
+
+    resumo = pd.DataFrame([
+        {
+            "Etapa": "Primeira resposta",
+            "No prazo": int((dados["SLA resposta"].isin(["Cumprido", "Dentro do prazo"])).sum()),
+            "Em risco": int((dados["SLA resposta"] == "Em risco").sum()),
+            "Atrasado": int((dados["SLA resposta"] == "Violado").sum()),
+        },
+        {
+            "Etapa": "Resolução",
+            "No prazo": int((dados["SLA resolução"].isin(["Cumprido", "Dentro do prazo"])).sum()),
+            "Em risco": int((dados["SLA resolução"] == "Em risco").sum()),
+            "Atrasado": int((dados["SLA resolução"] == "Violado").sum()),
+        },
+    ])
+    st.markdown("#### Situação dos prazos")
+    exibir_tabela_tematica(resumo)
+
+    st.markdown("#### Todos os chamados e situação atual")
+    def situacao_chamado(chamado):
+        status = chamado.get("status")
+        if status == "Cancelado":
+            return "Cancelado"
+        if status == "Fechado":
+            return "Fechado"
+        if status == "Resolvido":
+            return "Resolvido — aguardando confirmação"
+        return "Aberto"
+
+    def situacao_sla(chamado):
+        if chamado.get("status") == "Cancelado":
+            return "Não se aplica"
+        return sla.status_sla(chamado)["resolucao"]["status"]
+
+    visao_chamados = pd.DataFrame({
+        "Chamado": [f"#{item['id']}" for item in chamados_para_lista.to_dict("records")],
+        "Título": chamados_para_lista["titulo"].fillna("—"),
+        "Situação": [situacao_chamado(item) for item in chamados_para_lista.to_dict("records")],
+        "Status atual": chamados_para_lista["status"],
+        "SLA de resolução": [situacao_sla(item) for item in chamados_para_lista.to_dict("records")],
+        "Equipe": chamados_para_lista["equipe_destino"].fillna("—"),
     })
-    figura, eixo = plt.subplots(figsize=(8, 3.6))
-    _estilizar_grafico(figura, eixo)
-    posicoes = range(len(resumo))
-    eixo.bar([p - 0.2 for p in posicoes], resumo["Resposta"], width=0.4, label="Resposta", color="#5e9188")
-    eixo.bar([p + 0.2 for p in posicoes], resumo["Resolução"], width=0.4, label="Resolução", color="#3e5954")
-    eixo.set_xticks(list(posicoes), resumo["Status"], rotation=15)
-    eixo.set_ylabel("Chamados")
-    eixo.set_title("Situação dos prazos de SLA", loc="left", fontweight="bold")
-    legenda = eixo.legend(frameon=False)
-    for texto in legenda.get_texts():
-        texto.set_color("#262730")
-    eixo.spines[["top", "right"]].set_visible(False)
-    figura.tight_layout()
-    st.pyplot(figura, use_container_width=True)
-    plt.close(figura)
+    visao_chamados["Ordem"] = visao_chamados["SLA de resolução"].map(
+        {"Violado": 0, "Em risco": 1, "Dentro do prazo": 2, "Cumprido": 3, "Pausado": 4, "Não se aplica": 5}
+    ).fillna(6)
+    visao_chamados = visao_chamados.sort_values(["Ordem", "Chamado"]).drop(columns="Ordem")
+    exibir_tabela_tematica(visao_chamados)
 
 
 def relatorio_ia(chamados, admin):
     st.markdown("### Qualidade da classificação da IA")
+    st.caption("As métricas de qualidade usam a amostra global disponível. A distribuição de confiança abaixo usa os chamados do recorte selecionado.")
     st.caption(
         "Taxas de acerto usam a classificação final validada por analista. A confiança textual "
         "do modelo é exibida apenas como contexto e não é uma métrica de qualidade."
@@ -2286,7 +1447,6 @@ def relatorio_ia(chamados, admin):
         "Distribuição da confiança da classificação",
         "Confiança da classificação",
         "Quantidade",
-        "#5e9188",
     )
 
 
@@ -2320,7 +1480,7 @@ def relatorio_aprendizado_por_casos(admin):
 
 def relatorio_produtividade_equipe(chamados):
     st.markdown("### Relatório de produtividade da equipe")
-    st.caption("Produção por analista, baseada nos chamados atribuídos. O tempo de resolução desconta períodos em espera registrados.")
+    st.caption("Produção por analista, baseada nos chamados atribuídos. O tempo de resolução usa o calendário de SLA de cada chamado e desconta as pausas registradas.")
     dados = pd.DataFrame(chamados)
     if dados.empty or "analista_id" not in dados:
         st.info("Ainda não há chamados atribuídos à equipe.")
@@ -2333,27 +1493,21 @@ def relatorio_produtividade_equipe(chamados):
     dados["Analista"] = dados["nome_analista"].fillna("Analista removido")
     dados["criado_em"] = pd.to_datetime(dados["criado_em"])
     dados["resolvido_em"] = pd.to_datetime(dados["resolvido_em"])
-    # mysql-connector devolve DECIMAL como Decimal; o Pandas não permite
-    # subtrair esse tipo de uma série float de horas.
-    tempo_pausado_horas = pd.to_numeric(
-        dados["tempo_pausado_min"], errors="coerce",
-    ).fillna(0).astype(float) / 60
-    duracao_horas = (dados["resolvido_em"] - dados["criado_em"]).dt.total_seconds() / 3600
-    dados["tempo_resolucao_horas"] = (duracao_horas - tempo_pausado_horas).clip(lower=0)
+    dados["tempo_resolucao_horas"] = [duracao_resolucao_horas(c) for c in dados.to_dict("records")]
     produtividade = dados.groupby("Analista", as_index=False).agg(
         Atribuídos=("id", "count"),
         Fechados=("status", lambda status: int((status == "Fechado").sum())),
         Resolvidos=("resolvido_em", lambda data: int(data.notna().sum())),
-        **{"Tempo médio de resolução (h)": ("tempo_resolucao_horas", "mean")},
+        **{"Tempo médio de resolução (h de atendimento)": ("tempo_resolucao_horas", "mean")},
     ).sort_values(["Fechados", "Atribuídos"], ascending=False)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Analistas com demanda", len(produtividade))
     c2.metric("Chamados atribuídos", len(dados))
     c3.metric("Chamados fechados", int((dados["status"] == "Fechado").sum()))
-    _exibir_grafico_barras(produtividade, "Chamados fechados por analista", "Analista", "Fechados", "#8a5a00")
+    _exibir_grafico_barras(produtividade, "Chamados fechados por analista", "Analista", "Fechados")
     tabela = produtividade.copy()
-    tabela["Tempo médio de resolução (h)"] = tabela["Tempo médio de resolução (h)"].map(lambda valor: f"{valor:.1f}" if pd.notna(valor) else "—")
+    tabela["Tempo médio de resolução (h de atendimento)"] = tabela["Tempo médio de resolução (h de atendimento)"].map(lambda valor: f"{valor:.1f}" if pd.notna(valor) else "—")
     exibir_tabela_tematica(tabela)
 
 
@@ -2386,7 +1540,7 @@ def relatorio_cancelamentos(chamados):
     motivos["Percentual"] = (motivos["Quantidade"] / total_cancelados * 100).map(lambda valor: f"{valor:.1f}%")
     grafico, tabela = st.columns([1.4, 1])
     with grafico:
-        _exibir_grafico_barras(motivos, "Cancelamentos por motivo", "Motivo", "Quantidade", "#a82a22")
+        _exibir_grafico_barras(motivos, "Cancelamentos por motivo", "Motivo", "Quantidade")
     with tabela:
         exibir_tabela_tematica(motivos)
 
@@ -2409,30 +1563,35 @@ def excluir_perfil_usuario_admin(usuario_id, admin_id):
 
 
 def painel_privacidade_admin(admin):
-    st.markdown("### Direitos do titular")
-    st.caption("Consulte o titular por e-mail ou CPF. A busca por CPF é exata e o número completo não é exibido.")
-    identificador = st.text_input("E-mail ou CPF do titular", key="privacidade_identificador")
-    if not st.button("Localizar titular", type="primary", key="privacidade_localizar"):
+    if not usuario_tem_permissao(admin["id"], "privacidade.gerenciar"):
+        st.error("Seu perfil não permite consultar os dados de privacidade.")
         return
-
+    st.subheader("Direitos do titular")
+    st.caption("Localize a pessoa para gerar uma cópia de seus dados ou executar a anonimização autorizada. A busca por CPF é exata.")
+    with st.form("privacidade_busca"):
+        identificador = st.text_input("E-mail ou CPF do titular", key="privacidade_identificador", placeholder="Informe um identificador completo")
+        localizar = st.form_submit_button("Localizar titular", type="primary", key="privacidade_localizar")
+    if not localizar:
+        return
+    st.session_state.pop("titular_privacidade_id", None)
+    st.session_state.pop("titular_privacidade_email", None)
     try:
         titular, erro = buscar_titular_por_identificador(identificador, executor_id=admin["id"])
-    except ValueError as erro:
+    except (ValueError, PermissionError) as erro:
         st.error(str(erro))
         return
     if erro:
         st.warning(erro)
         return
-
     st.session_state.titular_privacidade_id = titular["id"]
+    st.session_state.titular_privacidade_email = titular["email"]
     st.rerun()
 
 
 def tela_aceite_privacidade(usuario):
     injetar_css()
-    col_esq, col_meio, col_dir = st.columns([1, 1.5, 1])
-    with col_meio:
-        st.markdown("### Privacidade e uso do sistema")
+    with painel_acesso():
+        st.title("Sua privacidade")
         st.caption(f"Política de privacidade — versão {VERSAO_POLITICA_PRIVACIDADE}")
         st.write("Leia a política de privacidade antes de continuar.")
         caminho_politica = Path(__file__).resolve().parent.parent / "PRIVACIDADE.md"
@@ -2448,7 +1607,7 @@ def tela_aceite_privacidade(usuario):
                 "ciente de que serão tratados conforme este Aviso de Privacidade e a "
                 "Lei nº 13.709/2018 (LGPD)."
             )
-            confirmar = st.form_submit_button("Aceitar e continuar", type="primary", use_container_width=True)
+            confirmar = st.form_submit_button("Aceitar e continuar", type="primary", width="stretch")
         if confirmar:
             if not aceito:
                 st.warning("Para continuar, confirme a leitura e o aceite do Aviso de Privacidade.")
@@ -2459,12 +1618,20 @@ def tela_aceite_privacidade(usuario):
 
 
 def acoes_privacidade_admin(admin):
+    if not usuario_tem_permissao(admin["id"], "privacidade.gerenciar"):
+        return
     titular_id = st.session_state.get("titular_privacidade_id")
     if not titular_id:
         return
-    titular = buscar_usuario_por_id(titular_id, executor_id=admin["id"])
-    if not titular:
+    email_titular = st.session_state.get("titular_privacidade_email")
+    if not email_titular:
+        st.info("Localize novamente o titular para consultar as ações disponíveis.")
+        return
+    titular, erro = buscar_titular_por_identificador(email_titular, executor_id=admin["id"])
+    if erro or not titular or titular["id"] != titular_id:
         st.session_state.pop("titular_privacidade_id", None)
+        st.session_state.pop("titular_privacidade_email", None)
+        st.info("O titular não está mais disponível nesta seleção. Faça uma nova busca.")
         return
 
     st.divider()
@@ -2491,172 +1658,163 @@ def acoes_privacidade_admin(admin):
             st.download_button(
                 "Baixar arquivo de acesso (ZIP)", data=exportacao["conteudo"],
                 file_name=f"dados_titular_{titular_id}.zip", mime="application/zip",
-                use_container_width=True,
+                width="stretch",
             )
             st.caption(f"Arquivo disponível até {exportacao['expira_em'].strftime('%d/%m/%Y %H:%M')} UTC.")
     st.caption("O arquivo contém os dados acessíveis do titular e anexos. Senha, segredo TOTP e códigos não são exportados.")
 
-    confirmar = st.checkbox(
-        "Confirmo a anonimização permanente: conteúdo de chamados, mensagens, anexos e dados derivados serão removidos ou anonimizados; métricas e auditoria técnica permanecerão.",
-        key=f"privacidade_confirmar_{titular_id}",
-    )
-    if st.button("Anonimizar dados do titular", type="primary", disabled=not confirmar, key=f"privacidade_anonimizar_{titular_id}"):
-        try:
-            resumo = anonimizar_titular(titular_id, autor_id=admin["id"])
-            st.success(
-                f"Dados anonimizados: {resumo['chamados']} chamado(s), {resumo['mensagens']} mensagem(ns), "
-                f"{resumo['anexos']} anexo(s) e {resumo['casos_ia']} caso(s) de IA."
-            )
-            st.session_state.pop("titular_privacidade_id", None)
-        except ValueError as erro:
-            st.error(str(erro))
+    with st.expander("Anonimização permanente do titular"):
+        st.warning("Esta operação remove ou anonimiza dados e conteúdos associados. Confirme a identidade e a autorização antes de continuar.")
+        confirmar = st.checkbox(
+            "Confirmo a anonimização permanente: conteúdo de chamados, mensagens, anexos e dados derivados serão removidos ou anonimizados; métricas e auditoria técnica permanecerão.",
+            key=f"privacidade_confirmar_{titular_id}",
+        )
+        if st.button("Anonimizar dados do titular", type="primary", disabled=not confirmar, key=f"privacidade_anonimizar_{titular_id}"):
+            try:
+                resumo = anonimizar_titular(titular_id, autor_id=admin["id"])
+                st.success(
+                    f"Dados anonimizados: {resumo['chamados']} chamado(s), {resumo['mensagens']} mensagem(ns), "
+                    f"{resumo['anexos']} anexo(s) e {resumo['casos_ia']} caso(s) de IA."
+                )
+                st.session_state.pop("titular_privacidade_id", None)
+            except ValueError as erro:
+                st.error(str(erro))
 
 
 def painel_departamentos_admin(admin):
-    st.markdown("### Departamentos")
-    st.caption("Organize a estrutura da empresa. Departamentos inativos são preservados no histórico e não aparecem em novos cadastros.")
-
-    with st.expander("Cadastrar departamento", expanded=False):
+    if not usuario_tem_permissao(admin["id"], "departamentos.gerenciar"):
+        st.error("Seu perfil não permite gerenciar departamentos.")
+        return
+    st.subheader("Departamentos")
+    st.caption("Mantenha a estrutura da organização. A inativação preserva os vínculos e o histórico.")
+    departamentos = listar_departamentos()
+    indicadores([
+        ("Departamentos ativos", sum(bool(d["ativo"]) for d in departamentos), "Disponíveis para novos cadastros."),
+        ("Pessoas vinculadas", sum(d["total_usuarios"] for d in departamentos), "Vínculos registrados nos departamentos cadastrados."),
+    ])
+    modo = st.segmented_control("O que deseja fazer?", ["Consultar", "Cadastrar", "Editar"], default="Consultar", required=True, key="departamentos_modo")
+    if modo == "Cadastrar":
         with st.form("form_novo_departamento", clear_on_submit=True):
-            nome = st.text_input("Nome do departamento")
-            descricao = st.text_input("Descrição (opcional)")
+            st.markdown("#### Novo departamento")
+            nome = st.text_input("Nome do departamento", placeholder="Ex.: Recursos Humanos")
+            descricao = st.text_area("Descrição (opcional)", help="Explique a área de atuação para facilitar a escolha no cadastro.")
             cadastrar = st.form_submit_button("Cadastrar departamento", type="primary")
         if cadastrar:
             try:
                 criar_departamento(nome, descricao, autor_id=admin["id"])
-                st.success("Departamento cadastrado.")
-                st.rerun()
-            except ValueError as erro:
+                recarregar_com_feedback("Departamento cadastrado.")
+            except (ValueError, PermissionError) as erro:
                 st.error(str(erro))
-
-    departamentos = listar_departamentos()
-    if not departamentos:
-        st.info("Nenhum departamento cadastrado.")
         return
-
-    tabela = pd.DataFrame(departamentos)[["nome", "descricao", "ativo", "total_usuarios"]].copy()
-    tabela.columns = ["Nome", "Descrição", "Ativo", "Usuários vinculados"]
-    tabela["Ativo"] = tabela["Ativo"].map(
-        lambda valor: "Sim" if valor in (True, 1, "1", "true", "True", "Sim", "sim") else "Não"
-    )
-    exibir_tabela_tematica(tabela)
-
-    por_id = {departamento["id"]: departamento for departamento in departamentos}
-    departamento_id = st.selectbox(
-        "Editar departamento",
-        options=list(por_id),
-        format_func=lambda item: por_id[item]["nome"],
-    )
+    if not departamentos:
+        st.info("Nenhum departamento cadastrado. Use Cadastrar para adicionar o primeiro.")
+        return
+    if modo == "Consultar":
+        busca = st.text_input("Buscar departamento", placeholder="Nome ou descrição", key="departamentos_busca").strip().casefold()
+        selecionados = [d for d in departamentos if not busca or busca in f"{d['nome']} {d.get('descricao') or ''}".casefold()]
+        tabela = pd.DataFrame([{"Departamento": d["nome"], "Descrição": d.get("descricao"), "Situação": "Ativo" if d["ativo"] else "Inativo", "Pessoas vinculadas": d["total_usuarios"]} for d in selecionados])
+        exibir_tabela_tematica(tabela)
+        return
+    por_id = {d["id"]: d for d in departamentos}
+    departamento_id = st.selectbox("Departamento para editar", list(por_id), format_func=lambda item: por_id[item]["nome"], key="departamento_edicao")
     departamento = por_id[departamento_id]
     with st.form(f"form_editar_departamento_{departamento_id}"):
         nome = st.text_input("Nome", value=departamento["nome"])
-        descricao = st.text_input("Descrição", value=departamento.get("descricao") or "")
-        ativo = st.checkbox("Departamento ativo", value=bool(departamento["ativo"]))
+        descricao = st.text_area("Descrição", value=departamento.get("descricao") or "")
+        ativo = st.toggle("Departamento ativo", value=bool(departamento["ativo"]), help="Ao inativar, o histórico e os usuários já vinculados são preservados.")
         salvar = st.form_submit_button("Salvar departamento", type="primary")
     if salvar:
         try:
             atualizar_departamento(departamento_id, nome, descricao, ativo, autor_id=admin["id"])
-            st.success("Departamento atualizado.")
-            st.rerun()
-        except ValueError as erro:
+            recarregar_com_feedback("Departamento atualizado.")
+        except (ValueError, PermissionError) as erro:
             st.error(str(erro))
 
 
 def painel_sla_admin(admin):
-    st.markdown("### Configurações de SLA e horário comercial")
-    st.caption("Estas configurações passam a valer para novos chamados. Chamados já abertos preservam a configuração vigente quando foram criados.")
+    if not usuario_tem_permissao(admin["id"], "sla.gerenciar"):
+        st.error("Seu perfil não permite alterar o SLA.")
+        return
+    st.subheader("SLA e horário de atendimento")
+    st.info("As alterações valem para novos chamados. Os chamados existentes mantêm sua configuração original.")
     configuracao = obter_configuracao_sla()
     nomes_dias = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
     dias_atuais = [nomes_dias[dia] for dia in configuracao["dias_uteis"]]
-    st.markdown("#### Agenda semanal vigente")
-    st.caption("Todos os horários são exibidos em UTC no ambiente produtivo.")
-    agenda = []
-    for indice, dia in enumerate(nomes_dias):
-        if indice in configuracao["dias_uteis"]:
-            agenda.append(
-                f"<div class='agenda-linha'><strong>{dia}</strong><div class='agenda-faixa agenda-ativa'>"
-                f"🟢 Atendimento: {configuracao['hora_inicio']} — {configuracao['hora_fim']}</div></div>"
-            )
-        else:
-            agenda.append(f"<div class='agenda-linha'><strong>{dia}</strong><div class='agenda-faixa agenda-fechada'>Fechado</div></div>")
-    st.markdown(
-        """<style>
-        .agenda-linha {display:grid; grid-template-columns:110px 1fr; gap:10px; align-items:center; margin:8px 0;}
-        .agenda-faixa {border-radius:8px; padding:10px 12px; font-size:0.9rem; font-weight:600; border:1px solid rgba(100,116,139,.28);}
-        .agenda-ativa {background:var(--agenda-active); border-left:7px solid var(--success); color:var(--agenda-active-text);}
-        .agenda-fechada {background:var(--agenda-closed); border-left:7px solid var(--muted); color:var(--agenda-closed-text);}
-        </style>""" + "".join(agenda), unsafe_allow_html=True,
-    )
+    with st.expander("Consultar a configuração vigente", expanded=False):
+        st.caption("Fuso de referência: America/Sao_Paulo.")
+        exibir_tabela_tematica(pd.DataFrame([
+            {"Dia": dia, "Atendimento": f"{configuracao['hora_inicio']} — {configuracao['hora_fim']}" if indice in configuracao["dias_uteis"] else "Fechado"}
+            for indice, dia in enumerate(nomes_dias)
+        ]))
     with st.form("form_configuracao_sla"):
-        dias = st.multiselect("Dias de atendimento", nomes_dias, default=dias_atuais)
-        col_inicio, col_fim, col_fechamento, col_risco = st.columns(4)
-        with col_inicio:
-            inicio = st.time_input("Início", value=time.fromisoformat(configuracao["hora_inicio"]))
-        with col_fim:
-            fim = st.time_input("Fim", value=time.fromisoformat(configuracao["hora_fim"]))
-        with col_fechamento:
-            fechamento = st.number_input("Fechamento automático (horas comerciais)", min_value=1, max_value=720, value=configuracao["horas_fechamento_automatico"])
-        with col_risco:
-            risco = st.number_input("Alerta de risco após (%)", min_value=1, max_value=99, value=int(configuracao["limiar_risco"] * 100))
-        st.markdown("#### Prazos por urgência (minutos comerciais)")
-        matriz = {}
-        for urgencia in ["Critica", "Alta", "Media", "Baixa"]:
-            resposta_col, resolucao_col = st.columns(2)
-            with resposta_col:
-                resposta = st.number_input(f"{urgencia} — primeira resposta", min_value=1, value=int(configuracao["matriz"][urgencia]["resposta"]), key=f"sla_resp_{urgencia}")
-            with resolucao_col:
-                resolucao = st.number_input(f"{urgencia} — resolução", min_value=1, value=int(configuracao["matriz"][urgencia]["resolucao"]), key=f"sla_res_{urgencia}")
-            matriz[urgencia] = {"resposta": resposta, "resolucao": resolucao}
-        salvar = st.form_submit_button("Salvar configurações", type="primary")
+        agenda, metas, operacao = st.tabs(["Agenda de atendimento", "Metas por urgência", "Regras operacionais"])
+        with agenda:
+            st.markdown("#### Dias e horários")
+            st.caption("Horários em America/Sao_Paulo. Selecione os dias em que a equipe atende.")
+            dias = st.multiselect("Dias de atendimento", nomes_dias, default=dias_atuais)
+            col_inicio, col_fim = st.columns(2)
+            inicio = col_inicio.time_input("Início do expediente", value=time.fromisoformat(configuracao["hora_inicio"]))
+            fim = col_fim.time_input("Fim do expediente", value=time.fromisoformat(configuracao["hora_fim"]))
+        with metas:
+            st.caption("Tempo em minutos comerciais, conforme a configuração de SLA vigente. Resposta e resolução são metas independentes.")
+            matriz = {}
+            for urgencia in ["Critica", "Alta", "Media", "Baixa"]:
+                st.markdown(f"**Urgência {rotulo(urgencia)}**")
+                resposta_col, resolucao_col = st.columns(2)
+                resposta = resposta_col.number_input("Primeira resposta (min)", min_value=1, value=int(configuracao["matriz"][urgencia]["resposta"]), key=f"sla_resp_{urgencia}")
+                resolucao = resolucao_col.number_input("Resolução (min)", min_value=1, value=int(configuracao["matriz"][urgencia]["resolucao"]), key=f"sla_res_{urgencia}")
+                matriz[urgencia] = {"resposta": resposta, "resolucao": resolucao}
+        with operacao:
+            fechamento = st.number_input("Fechamento automático (horas comerciais)", min_value=1, max_value=720, value=configuracao["horas_fechamento_automatico"], help="Prazo para fechar chamados resolvidos, conforme a regra existente de validação.")
+            risco = st.number_input("Alertar risco após consumir (%)", min_value=1, max_value=99, value=int(configuracao["limiar_risco"] * 100), help="Ex.: 80 significa alertar quando 80% do tempo disponível tiver sido consumido.")
+            limite_chamados = st.number_input("Limite de chamados ativos por pessoa", min_value=1, max_value=100, value=int(configuracao["limite_chamados_ativos_por_usuario"]), help="Conta os estados Novo, Em Andamento, Em Espera e Resolvido.")
+        salvar = st.form_submit_button("Salvar configurações para novos chamados", type="primary", width="stretch")
     if salvar:
         try:
-            atualizar_configuracao_sla({"dias_uteis": [nomes_dias.index(dia) for dia in dias], "hora_inicio": inicio.strftime("%H:%M"), "hora_fim": fim.strftime("%H:%M"), "horas_fechamento_automatico": fechamento, "limiar_risco": risco / 100, "matriz": matriz}, admin["id"])
-            st.success("Configurações de SLA atualizadas para novos chamados.")
-            st.rerun()
+            atualizar_configuracao_sla({**configuracao, "dias_uteis": [nomes_dias.index(dia) for dia in dias], "hora_inicio": inicio.strftime("%H:%M"), "hora_fim": fim.strftime("%H:%M"), "horas_fechamento_automatico": fechamento, "limiar_risco": risco / 100, "limite_chamados_ativos_por_usuario": limite_chamados, "matriz": matriz}, admin["id"])
+            recarregar_com_feedback("Configurações de SLA atualizadas para novos chamados.")
         except (ValueError, PermissionError) as erro:
             st.error(str(erro))
 
 
 def painel_auditoria_admin(admin):
-    st.markdown("### Auditoria operacional")
-    st.caption("Consulta protegida de operações relevantes. Exportações omitem dados pessoais e conteúdos de chamados.")
-    colunas = st.columns(3)
-    with colunas[0]:
-        usuario_id = st.number_input("ID do usuário", min_value=0, value=0)
-        acao = st.text_input("Ação exata")
-    with colunas[1]:
-        entidade = st.text_input("Entidade")
-        resultado = st.selectbox("Resultado", ["", "SUCESSO", "FALHA"])
-    with colunas[2]:
-        limite = st.selectbox("Eventos por página", [50, 100, 200], index=1)
-        pagina = st.number_input("Página", min_value=1, value=1, step=1)
-    periodo = st.date_input("Período", value=(), key="auditoria_periodo")
+    if not usuario_tem_permissao(admin["id"], "relatorios.visualizar"):
+        st.error("Seu perfil não permite consultar a auditoria.")
+        return
+    st.subheader("Auditoria")
+    st.caption("Consulte as operações registradas. Os resultados e a exportação não incluem o conteúdo de chamados ou credenciais.")
+    with st.form("filtros_auditoria"):
+        periodo = st.date_input("Período dos eventos", value=(), key="auditoria_periodo")
+        resultado = st.selectbox("Resultado da operação", ["", "SUCESSO", "FALHA"], format_func=lambda valor: {"": "Todos", "SUCESSO": "Sucesso", "FALHA": "Falha"}[valor])
+        with st.expander("Filtros avançados"):
+            usuario_id = st.number_input("ID do usuário", min_value=0, value=0, help="Deixe 0 para consultar todos os usuários autorizados.")
+            acao = st.text_input("Ação exata", placeholder="Ex.: LOGIN_REALIZADO")
+            entidade = st.text_input("Entidade", placeholder="Ex.: chamado")
+            limite = st.selectbox("Eventos por página", [50, 100, 200], index=1)
+            pagina = st.number_input("Página", min_value=1, value=1, step=1)
+        st.form_submit_button("Consultar eventos", type="primary")
     inicio = fim = None
-    if isinstance(periodo, tuple) and len(periodo) == 2:
+    if isinstance(periodo, (tuple, list)) and len(periodo) == 1:
+        st.info("Complete a data final para consultar esse período.")
+        return
+    if isinstance(periodo, (tuple, list)) and len(periodo) == 2:
         inicio = datetime.combine(periodo[0], time.min)
         fim = datetime.combine(periodo[1] + timedelta(days=1), time.min)
-    eventos = listar_auditoria(limite=limite, usuario_id=usuario_id or None,
-                               acao=acao or None, entidade=entidade or None,
-                               resultado=resultado or None, inicio=inicio, fim=fim, pagina=pagina - 1,
-                               executor_id=admin["id"])
+    eventos = listar_auditoria(limite=limite, usuario_id=usuario_id or None, acao=acao.strip() or None,
+                              entidade=entidade.strip() or None, resultado=resultado or None,
+                              inicio=inicio, fim=fim, pagina=pagina - 1, executor_id=admin["id"])
     if not eventos:
-        st.info("Nenhum evento de auditoria encontrado.")
+        st.info("Nenhum evento encontrado. Ajuste os filtros ou volte à primeira página.")
         return
+    st.caption(f"Página {pagina} · {len(eventos)} evento(s) · horários apresentados pelo sistema em America/Sao_Paulo")
     dados = pd.DataFrame(eventos)
-    col_data, col_acao = st.columns(2)
-    with col_data:
-        busca_evento = st.text_input("Buscar ação ou entidade").strip().lower()
-    with col_acao:
-        acoes = ["Todas"] + sorted(dados["acao"].dropna().unique().tolist())
-        acao = st.selectbox("Ação", acoes)
-    if busca_evento:
-        dados = dados[dados.apply(lambda linha: busca_evento in f"{linha.get('acao', '')} {linha.get('entidade', '')}".lower(), axis=1)]
-    if acao != "Todas":
-        dados = dados[dados["acao"] == acao]
+    busca = st.text_input("Buscar nos eventos desta página", placeholder="Ação ou entidade", key="auditoria_busca_pagina").strip().casefold()
+    if busca:
+        dados = dados[dados.apply(lambda linha: busca in f"{linha.get('acao', '')} {linha.get('entidade', '')}".casefold(), axis=1)]
     exibicao = dados[["criado_em", "acao", "entidade", "entidade_id", "resultado"]].copy()
     exibicao.columns = ["Data", "Ação", "Entidade", "ID", "Resultado"]
-    exibir_tabela_tematica(exibicao)
-    st.download_button("Exportar auditoria filtrada (CSV)", exibicao.to_csv(index=False).encode("utf-8-sig"), "auditoria.csv", "text/csv", use_container_width=True)
+    st.dataframe(exibicao, hide_index=True, width="stretch", column_config={"Data": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm")})
+    st.download_button("Exportar os eventos exibidos (CSV)", exibicao.to_csv(index=False).encode("utf-8-sig"), "auditoria.csv", "text/csv")
 
 
 def relatorio_operacional(chamados, admin):
@@ -2669,12 +1827,19 @@ def relatorio_operacional(chamados, admin):
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Backlog atual", len(ativos))
     c2.metric("Em risco ou violados", sum(sla.pior_status(sla.status_sla(c)) in {"Em risco", "Violado"} for c in ativos.to_dict("records")))
-    reabertos = 0
-    for chamado_id in dados["id"].tolist():
-        reabertos += sum(evento["tipo"] == "REABERTURA" for evento in listar_historico_chamado(chamado_id, admin["id"]))
-    c3.metric("Reaberturas", reabertos)
+    if usuario_tem_permissao(admin["id"], "chamados.visualizar_fila"):
+        reabertos = 0
+        for chamado_id in dados["id"].tolist():
+            reabertos += sum(evento["tipo"] == "REABERTURA" for evento in listar_historico_chamado(chamado_id, admin["id"]))
+        c3.metric("Reaberturas", reabertos, help="Eventos de reabertura nos chamados do recorte.")
+    else:
+        c3.metric("Reaberturas", "—", help="A consulta de histórico operacional exige acesso à fila.")
     c4.metric("Resolvidos/fechados", len(resolvidos))
-    pesquisas = listar_pesquisas_satisfacao(admin["id"])
+    ids_periodo = set(dados["id"].tolist())
+    pesquisas = [
+        pesquisa for pesquisa in listar_pesquisas_satisfacao(admin["id"])
+        if pesquisa["chamado_id"] in ids_periodo
+    ]
     if pesquisas:
         st.caption(f"Satisfação média: {sum(item['nota'] for item in pesquisas) / len(pesquisas):.1f}/5 em {len(pesquisas)} avaliação(ões).")
     carga = ativos.groupby(ativos["equipe_destino"].fillna("Sem equipe")).size().reset_index(name="Backlog")
@@ -2685,11 +1850,230 @@ def relatorio_operacional(chamados, admin):
     tendencia.columns = ["Data", "Chamados abertos"]
     carga_coluna, tendencia_coluna = st.columns(2)
     with carga_coluna:
-        _exibir_grafico_barras(carga, "Carga atual por equipe", "Equipe", "Backlog", "#5e9188")
+        _exibir_grafico_barras(carga, "Carga atual por equipe", "Equipe", "Backlog")
     with tendencia_coluna:
-        _exibir_grafico_barras(tendencia, "Tendência de abertura no período", "Data", "Chamados abertos", "#3e5954")
+        _exibir_grafico_barras(tendencia, "Tendência de abertura no período", "Data", "Chamados abertos")
     exportacao = dados[["id", "status", "categoria", "urgencia", "equipe_destino", "criado_em", "resolvido_em"]].copy()
     st.download_button("Exportar indicadores operacionais (CSV)", exportacao.to_csv(index=False).encode("utf-8-sig"), "indicadores_operacionais.csv", "text/csv")
+
+
+def _formatar_percentual(valor):
+    return f"{valor:.1f}%"
+
+
+def _gerar_insights_executivos(dados, ativos, violacoes, satisfacao, casos_ia):
+    """Traduz sinais já classificados pela IA em recomendações rastreáveis.
+
+    Não faz diagnóstico automático a partir de textos livres: os sinais utilizam
+    somente classificações, SLA e dados agregados que já existem no sistema.
+    """
+    total = len(dados)
+    categoria = dados["Categoria"].value_counts().index[0] if total else "—"
+    concentracao = (
+        dados["Categoria"].value_counts().iloc[0] / total * 100 if total else 0
+    )
+    insights = []
+    if concentracao >= 40:
+        insights.append(
+            f"A IA agrupou {_formatar_percentual(concentracao)} da demanda em **{categoria}**; "
+            "priorize uma ação preventiva nesse tema."
+        )
+    if violacoes:
+        insights.append(
+            f"Há **{violacoes}** chamado(s) em violação de SLA; trate a fila crítica antes de ampliar a capacidade."
+        )
+    if len(ativos):
+        insights.append(
+            f"O backlog representa **{_formatar_percentual(len(ativos) / total * 100)}** do período; "
+            "acompanhe-o diariamente por equipe e urgência."
+        )
+    if satisfacao is not None and satisfacao < 4:
+        insights.append("A satisfação está abaixo de 4/5; revise comunicação de status e qualidade da solução entregue.")
+    if casos_ia:
+        insights.append(
+            f"A base de casos validados já tem **{casos_ia}** referência(s): use-a para padronizar os temas recorrentes."
+        )
+    return insights or ["Ainda não há volume suficiente para recomendações automatizadas no período selecionado."]
+
+
+def _exibir_diagrama_ishikawa(sinais, efeito):
+    st.markdown(f"**Efeito a investigar: {efeito.replace(chr(10), ' ')}**")
+    for dimensao, evidencias in sinais.items():
+        with st.container(border=True):
+            st.markdown(f"**{dimensao}**")
+            for evidencia in evidencias:
+                st.write(evidencia)
+
+
+def relatorio_executivo_suporte(chamados, admin):
+    renderizar_dashboard(chamados)
+    if chamados:
+        with st.expander("Análises complementares: concentração de demanda e hipóteses"):
+            _relatorio_executivo_complementar(chamados, admin)
+
+
+def _relatorio_executivo_complementar(chamados, admin):
+    """Visão estratégica: Pareto, SWOT e Ishikawa sem expor dados pessoais."""
+    st.markdown("### Dashboard executivo de suporte")
+    st.caption(
+        "Leitura gerencial baseada em dados agregados do período. Os sinais de IA usam as "
+        "classificações já revisáveis no sistema; hipóteses de causa devem ser validadas pela gestão."
+    )
+    dados = pd.DataFrame(chamados)
+    if dados.empty:
+        st.info("Ainda não há chamados no período selecionado para gerar a visão executiva.")
+        return
+
+    dados["Categoria"] = dados["categoria"].fillna("Não classificada").replace("", "Não classificada")
+    dados["Equipe"] = dados["equipe_destino"].fillna("Sem equipe").replace("", "Sem equipe")
+    dados["Urgência"] = dados["urgencia"].fillna("Não informada").replace("", "Não informada")
+    dados["SLA resolução"] = [sla.status_sla(item)["resolucao"]["status"] for item in dados.to_dict("records")]
+    ativos = dados[~dados["status"].isin(STATUS_ENCERRADOS)].copy()
+    violacoes = int((dados["SLA resolução"] == "Violado").sum())
+    em_risco = int((ativos["SLA resolução"] == "Em risco").sum())
+    criticos_ativos = int(((ativos["Urgência"] == "Critica") | (ativos["Urgência"] == "Alta")).sum())
+    ids_periodo = set(dados["id"].tolist())
+    pesquisas = [
+        pesquisa for pesquisa in listar_pesquisas_satisfacao(admin["id"])
+        if pesquisa["chamado_id"] in ids_periodo
+    ]
+    satisfacao = (sum(item["nota"] for item in pesquisas) / len(pesquisas)) if pesquisas else None
+    casos_ia = len(listar_casos_base_ia(executor_id=admin["id"]))
+
+    prazo_concluido = dados[(dados["status"] != "Cancelado") & dados["resolvido_em"].notna()]
+    resolvidos_no_prazo = int((prazo_concluido["SLA resolução"] == "Cumprido").sum())
+    taxa_sla = resolvidos_no_prazo / len(prazo_concluido) * 100 if len(prazo_concluido) else 0
+    categoria_lider = dados["Categoria"].value_counts().index[0]
+    percentual_categoria_lider = dados["Categoria"].value_counts().iloc[0] / len(dados) * 100
+    espera = int((ativos["status"] == "Em Espera").sum())
+    prioridade_imediata = dados[
+        (dados["SLA resolução"] == "Violado") |
+        ((~dados["status"].isin(STATUS_ENCERRADOS)) & dados["Urgência"].isin(["Critica", "Alta"]))
+    ]
+
+    if violacoes or criticos_ativos:
+        situacao, icone, mensagem_situacao = "Crítica", "🔴", "Existem prazos vencidos ou solicitações de alta prioridade que exigem atuação imediata."
+    elif em_risco or espera or (satisfacao is not None and satisfacao < 4):
+        situacao, icone, mensagem_situacao = "Atenção", "🟡", "A operação funciona, mas há sinais que precisam de acompanhamento nesta semana."
+    else:
+        situacao, icone, mensagem_situacao = "Controlada", "🟢", "Não há alertas críticos no recorte selecionado. Continue acompanhando os principais temas."
+
+    st.markdown("#### Em resumo")
+    st.info(f"{icone} **Situação da operação: {situacao}.** {mensagem_situacao}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Chamados no período", len(dados), help="Total de solicitações abertas no período selecionado.")
+    c2.metric("Pendentes na fila", len(ativos), help="Chamados que ainda precisam de atendimento ou confirmação.")
+    c3.metric("Prioridade imediata", len(prioridade_imediata), f"{violacoes} prazo(s) vencido(s)", help="Chamados únicos com prazo vencido ou ainda abertos em alta/crítica urgência.")
+    c4.metric("Maior tema", categoria_lider, _formatar_percentual(percentual_categoria_lider), help="Tema que mais gera chamados no período.")
+
+    st.markdown("#### Próximas ações")
+    acoes = []
+    if violacoes:
+        acoes.append(("🚨", "Resolver prazos vencidos", f"{violacoes} chamado(s)"))
+    if criticos_ativos:
+        acoes.append(("🔴", "Acompanhar prioridades altas", f"{criticos_ativos} chamado(s)"))
+    if espera:
+        acoes.append(("🟡", "Destravar chamados em espera", f"{espera} chamado(s)"))
+    acoes.append(("💡", f"Prevenir ocorrências de {categoria_lider}", _formatar_percentual(percentual_categoria_lider) + " da demanda"))
+    if satisfacao is not None and satisfacao < 4:
+        acoes.append(("💬", "Melhorar comunicação com usuários", f"Satisfação atual: {satisfacao:.1f}/5"))
+    for coluna, (icone_acao, titulo_acao, detalhe_acao) in zip(st.columns(min(4, len(acoes))), acoes[:4]):
+        with coluna:
+            with st.container(border=True):
+                st.markdown(f"### {icone_acao}")
+                st.markdown(f"**{titulo_acao}**")
+                st.caption(detalhe_acao)
+
+    with st.expander("Indicadores de apoio", expanded=False):
+        apoio1, apoio2, apoio3, apoio4 = st.columns(4)
+        apoio1.metric("SLA de resolução", _formatar_percentual(taxa_sla) if len(prazo_concluido) else "Sem amostra", f"{resolvidos_no_prazo}/{len(prazo_concluido)} concluídos")
+        apoio2.metric("Em risco de atraso", em_risco)
+        apoio3.metric("Em espera", espera)
+        apoio4.metric("Satisfação", f"{satisfacao:.1f}/5" if satisfacao is not None else "Sem avaliação")
+
+    st.markdown("#### Onde concentrar o esforço (Pareto 80/20)")
+    pareto_col, resumo_col = st.columns([1.45, 1])
+    with pareto_col:
+        recorte = st.radio(
+            "O que você quer priorizar?",
+            ["Problemas mais frequentes", "Fila pendente por equipe", "Prazos vencidos por equipe"],
+            horizontal=True,
+            key="pareto_prioridade",
+        )
+        if recorte == "Problemas mais frequentes":
+            base_pareto, dimensao, titulo_pareto = dados, "Categoria", "Problemas que mais geram chamados"
+        elif recorte == "Fila pendente por equipe":
+            base_pareto, dimensao, titulo_pareto = ativos, "Equipe", "Fila pendente por equipe"
+        else:
+            base_pareto, dimensao, titulo_pareto = dados[dados["SLA resolução"] == "Violado"], "Equipe", "Prazos vencidos por equipe"
+        if base_pareto.empty:
+            st.success("Não há dados neste recorte. Isso é um bom sinal para o acompanhamento atual.")
+            pareto = pd.DataFrame(columns=[dimensao, "Chamados", "% acumulado"])
+        else:
+            pareto = base_pareto[dimensao].value_counts().rename_axis(dimensao).reset_index(name="Chamados")
+            pareto["% acumulado"] = pareto["Chamados"].cumsum() / pareto["Chamados"].sum() * 100
+        if not pareto.empty:
+            _exibir_grafico_barras(pareto, titulo_pareto, dimensao, "Chamados")
+            st.caption("A participação acumulada é apresentada na tabela ao lado; 80% é uma referência, não uma causa comprovada.")
+
+
+    with resumo_col:
+        st.markdown("##### Decisão recomendada")
+        if pareto.empty:
+            st.write("Não há item crítico para priorizar neste recorte.")
+        else:
+            pareto_80 = pareto[pareto["% acumulado"].shift(fill_value=0) < 80]
+            if pareto_80.empty:
+                pareto_80 = pareto.head(1)
+            participacao = pareto_80["Chamados"].sum() / pareto["Chamados"].sum() * 100
+            st.write(
+                f"Comece por **{', '.join(pareto_80[dimensao].astype(str).tolist())}**: "
+                f"esses itens representam **{_formatar_percentual(participacao)}** deste problema."
+            )
+            st.caption("A tabela mostra a participação acumulada para apoiar a priorização.")
+            pareto_exibicao = pareto.copy()
+            pareto_exibicao["% acumulado"] = pareto_exibicao["% acumulado"].map(_formatar_percentual)
+            exibir_tabela_tematica(pareto_exibicao)
+
+    with st.expander("Diagnóstico FOFA — pontos fortes e alertas", expanded=False):
+        st.caption("Resumo para decidir o que manter, corrigir, aproveitar e acompanhar.")
+        strengths = [f"{_formatar_percentual(taxa_sla)} de resolução no prazo" if len(prazo_concluido) else "Indicador de SLA ainda sem amostra concluída"]
+        if satisfacao is not None:
+            strengths.append(f"Satisfação média de {satisfacao:.1f}/5")
+        if casos_ia:
+            strengths.append(f"{casos_ia} caso(s) validado(s) ampliando a memória da IA")
+        fraquezas = [f"{violacoes} violação(ões) de SLA", f"{len(ativos)} chamado(s) ainda no backlog"]
+        oportunidades = [f"Prevenir ocorrências em {categoria_lider}", "Transformar soluções recorrentes em autoatendimento"]
+        ameacas = [f"{criticos_ativos} prioridade(s) alta/crítica em aberto", "Concentração de demanda pode ampliar o risco"]
+        for coluna, titulo, itens in zip(st.columns(4), ["Forças", "Alertas", "Oportunidades", "Riscos"], [strengths, fraquezas, oportunidades, ameacas]):
+            with coluna:
+                with st.container(border=True):
+                    st.markdown(f"**{titulo}**")
+                    for item in itens[:2]:
+                        st.write(f"• {item}")
+
+    with st.expander("Possíveis causas dos alertas — evidências e hipóteses", expanded=False):
+        st.caption(
+            "Efeito analisado: atrasos e pressão no atendimento. Cada ramo apresenta uma evidência "
+            "do sistema e uma hipótese a validar pela equipe; não representa causa raiz confirmada."
+        )
+        equipe_lider = ativos["Equipe"].value_counts().index[0] if not ativos.empty else "Sem backlog"
+        dados["Departamento"] = dados.apply(_departamento_relatorio, axis=1)
+        departamento_lider = dados["Departamento"].value_counts().index[0]
+        sinais = {
+            "Método / processo": [f"{espera} chamado(s) em espera", "Etapas de aprovação, retorno e escalonamento"],
+            "Pessoas": [f"Maior fila: equipe {equipe_lider}", "Distribuição de carga e cobertura da equipe"],
+            "Sistemas": [f"Maior volume: {categoria_lider}", "Recorrência de falhas no serviço ou sistema"],
+            "Medição": [f"{violacoes} prazo(s) de SLA vencido(s)", "Alertas e acompanhamento antes do vencimento"],
+            "Ambiente": [f"Maior demanda: {departamento_lider}", "Picos locais, mudanças e sazonalidade"],
+            "Conhecimento": [f"{casos_ia} caso(s) validado(s)", "Cobertura de artigos e orientação inicial"],
+        }
+        _exibir_diagrama_ishikawa(sinais, "Atrasos e pressão\nno atendimento")
+
+    with st.expander("Leitura complementar da IA", expanded=False):
+        st.caption("Sugestões baseadas nas classificações, nos prazos e nos casos validados já existentes no sistema.")
+        for insight in _gerar_insights_executivos(dados, ativos, violacoes, satisfacao, casos_ia):
+            st.write(f"• {insight}")
 
 
 def relatorio_chamados_abertos_por_departamento(chamados):
@@ -2711,13 +2095,7 @@ def relatorio_chamados_abertos_por_departamento(chamados):
         })
     else:
         abertos = dados[~dados["status"].isin(STATUS_ENCERRADOS)].copy()
-        abertos["Departamento"] = (
-            abertos["departamento_usuario"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .replace("", "Não informado")
-        )
+        abertos["Departamento"] = abertos.apply(_departamento_relatorio, axis=1)
         contagem = abertos.groupby("Departamento").size()
         ordem = list(dict.fromkeys(nomes_departamentos + contagem.index.tolist()))
         abertos_por_departamento = pd.DataFrame({
@@ -2758,7 +2136,6 @@ def relatorio_chamados_abertos_por_departamento(chamados):
             "Backlog por departamento",
             "Departamento",
             "Chamados abertos",
-            "#1f5f78",
         )
     with tabela:
         exibir_tabela_tematica(abertos_por_departamento)
@@ -2777,13 +2154,7 @@ def relatorio_demanda_por_departamento_categoria(chamados):
         st.info("Ainda não há chamados no período selecionado para analisar a demanda.")
         return
 
-    dados["Departamento"] = (
-        dados["departamento_usuario"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .replace("", "Não informado")
-    )
+    dados["Departamento"] = dados.apply(_departamento_relatorio, axis=1)
     dados["Categoria"] = (
         dados["categoria"]
         .fillna("")
@@ -2828,7 +2199,6 @@ def relatorio_demanda_por_departamento_categoria(chamados):
             f"Categorias recorrentes — {departamento_selecionado}",
             "Categoria",
             "Chamados criados",
-            "#8a5a00",
         )
     with tabela:
         exibir_tabela_tematica(demanda_departamento)
@@ -2885,72 +2255,80 @@ def painel_perfis_admin(admin):
             if permissao_base not in por_codigo:
                 continue
             acesso_grupo = permissao_base in selecionadas
-            st.markdown(f"##### {categoria}")
-            permissao_base_item = por_codigo[permissao_base]
-            st.caption(
-                f"Ação-base: marque **{permissao_base_item['nome']}** para liberar as demais opções deste grupo."
-            )
-            for permissao in sorted(
-                itens,
-                key=lambda item: (item["codigo"] != permissao_base, item["nome"]),
-            ):
-                eh_permissao_base = permissao["codigo"] == permissao_base
-                depende_acesso_grupo = not eh_permissao_base
-                marcada = bloqueadas or permissao["id"] in selecionadas
-                indisponivel_por_dependencia = depende_acesso_grupo and not acesso_grupo
-                ajuda = permissao["descricao"]
-                if bloqueadas:
-                    rotulo = f"🔒 {permissao['nome']} — perfil protegido"
-                    ajuda = "As permissões do perfil Administrador são fixas e não podem ser alteradas aqui."
-                elif eh_permissao_base:
-                    rotulo = f"🔑 {permissao['nome']} — libera este grupo"
-                elif indisponivel_por_dependencia:
-                    rotulo = f"🔒 {permissao['nome']} — requer ação-base"
-                    ajuda = (
-                        f"Indisponível até marcar '{permissao_base_item['nome']}', "
-                        "a ação-base deste grupo."
-                    )
-                else:
-                    rotulo = f"🔓 {permissao['nome']}"
-                marcada = st.checkbox(
-                    rotulo, value=marcada, help=ajuda,
-                    disabled=bloqueadas or indisponivel_por_dependencia,
-                    key=f"{chave}_{permissao['id']}",
+            with st.expander(categoria, expanded=False):
+                permissao_base_item = por_codigo[permissao_base]
+                st.caption(
+                    f"Ação-base: marque **{permissao_base_item['nome']}** para liberar as demais opções deste grupo."
                 )
-                if eh_permissao_base:
-                    acesso_grupo = marcada
-                    if not acesso_grupo:
-                        for item in itens:
-                            if item["codigo"] != permissao_base:
-                                st.session_state[f"{chave}_{item['id']}"] = False
-                if marcada:
-                    permissao_ids.append(permissao["id"])
+                for permissao in sorted(
+                    itens,
+                    key=lambda item: (item["codigo"] != permissao_base, item["nome"]),
+                ):
+                    eh_permissao_base = permissao["codigo"] == permissao_base
+                    depende_acesso_grupo = not eh_permissao_base
+                    marcada = bloqueadas or permissao["id"] in selecionadas
+                    indisponivel_por_dependencia = depende_acesso_grupo and not acesso_grupo
+                    ajuda = permissao["descricao"]
+                    if bloqueadas:
+                        rotulo = f"🔒 {permissao['nome']} — perfil protegido"
+                        ajuda = "As permissões do perfil Administrador são fixas e não podem ser alteradas aqui."
+                    elif eh_permissao_base:
+                        rotulo = f"🔑 {permissao['nome']} — libera este grupo"
+                    elif indisponivel_por_dependencia:
+                        rotulo = f"🔒 {permissao['nome']} — requer ação-base"
+                        ajuda = (
+                            f"Indisponível até marcar '{permissao_base_item['nome']}', "
+                            "a ação-base deste grupo."
+                        )
+                    else:
+                        rotulo = f"🔓 {permissao['nome']}"
+                    marcada = st.checkbox(
+                        rotulo, value=marcada, help=ajuda,
+                        disabled=bloqueadas or indisponivel_por_dependencia,
+                        key=f"{chave}_{permissao['id']}",
+                    )
+                    if eh_permissao_base:
+                        acesso_grupo = marcada
+                        if not acesso_grupo:
+                            for item in itens:
+                                if item["codigo"] != permissao_base:
+                                    st.session_state[f"{chave}_{item['id']}"] = False
+                    if marcada:
+                        permissao_ids.append(permissao["id"])
         return permissao_ids
 
-    with st.expander("Cadastrar perfil", expanded=False):
-        nome = st.text_input("Nome do perfil", placeholder="Ex.: Suporte N1", key="novo_perfil_nome")
-        descricao = st.text_input("Descrição (opcional)", key="novo_perfil_descricao")
-        st.caption("Marque a primeira permissão de cada grupo para liberar suas ações adicionais.")
-        permissao_ids = renderizar_permissoes("novo_perfil")
-        cadastrar = st.button("Cadastrar perfil", type="primary", key="novo_perfil_cadastrar")
-        if cadastrar:
-            try:
-                criar_perfil(nome, descricao, permissao_ids, admin["id"])
-                for permissao in permissoes:
-                    st.session_state.pop(f"novo_perfil_{permissao['id']}", None)
-                st.session_state.pop("novo_perfil_nome", None)
-                st.session_state.pop("novo_perfil_descricao", None)
-                st.success("Perfil cadastrado.")
-                st.rerun()
-            except (ValueError, PermissionError, mysql.connector.Error) as erro:
-                st.error(str(erro))
+    modo = st.segmented_control("Gerenciar perfis", ["Consultar", "Criar perfil", "Editar perfil"], default="Consultar", required=True, key="perfis_modo")
+    if modo == "Consultar":
+        if not perfis:
+            st.info("Nenhum perfil disponível para consulta.")
+            return
+        tabela = pd.DataFrame(perfis)[["nome", "descricao", "ativo", "total_usuarios", "total_permissoes"]].copy()
+        tabela.columns = ["Perfil", "Descrição", "Ativo", "Usuários vinculados", "Permissões"]
+        tabela["Ativo"] = tabela["Ativo"].map(
+            lambda valor: "Sim" if valor in (True, 1, "1", "true", "True", "Sim", "sim") else "Não"
+        )
+        exibir_tabela_tematica(tabela)
 
-    tabela = pd.DataFrame(perfis)[["nome", "descricao", "ativo", "total_usuarios", "total_permissoes"]].copy()
-    tabela.columns = ["Perfil", "Descrição", "Ativo", "Usuários vinculados", "Permissões"]
-    tabela["Ativo"] = tabela["Ativo"].map(
-        lambda valor: "Sim" if valor in (True, 1, "1", "true", "True", "Sim", "sim") else "Não"
-    )
-    exibir_tabela_tematica(tabela)
+        return
+    if modo == "Criar perfil":
+        with st.expander("Cadastrar perfil", expanded=True):
+            nome = st.text_input("Nome do perfil", placeholder="Ex.: Suporte N1", key="novo_perfil_nome")
+            descricao = st.text_input("Descrição (opcional)", key="novo_perfil_descricao")
+            st.caption("Marque a primeira permissão de cada grupo para liberar suas ações adicionais.")
+            permissao_ids = renderizar_permissoes("novo_perfil")
+            cadastrar = st.button("Cadastrar perfil", type="primary", key="novo_perfil_cadastrar")
+            if cadastrar:
+                try:
+                    criar_perfil(nome, descricao, permissao_ids, admin["id"])
+                    st.session_state.ui_limpar_prefixos = ["novo_perfil_"]
+                    recarregar_com_feedback('Perfil cadastrado.')
+                except (ValueError, PermissionError, mysql.connector.Error) as erro:
+                    st.error(str(erro))
+
+        return
+    if not perfis:
+        st.info("Cadastre um perfil antes de editar.")
+        return
 
     perfis_por_id = {perfil["id"]: perfil for perfil in perfis}
     perfil_id = st.selectbox(
@@ -2985,32 +2363,35 @@ def painel_perfis_admin(admin):
         "Salvar perfil", type="primary", key=f"perfil_{perfil_id}_salvar",
         disabled=administrador_protegido and not pode_alterar_administrador,
     )
-    confirmar_exclusao = st.checkbox(
-        "Confirmo a exclusão deste perfil sem usuários vinculados.", key=f"perfil_{perfil_id}_confirmar_exclusao",
-        disabled=bool(perfil["sistema"]),
-    )
-    excluir = st.button(
-        "Excluir perfil", key=f"perfil_{perfil_id}_excluir",
-        disabled=bool(perfil["sistema"]) or not confirmar_exclusao,
-    )
+    with st.expander("Excluir este perfil"):
+        st.caption("Perfis do sistema e perfis com pessoas vinculadas não podem ser excluídos.")
+        confirmar_exclusao = st.checkbox(
+            "Confirmo a exclusão deste perfil sem usuários vinculados.", key=f"perfil_{perfil_id}_confirmar_exclusao",
+            disabled=bool(perfil["sistema"]),
+        )
+        excluir = st.button(
+            "Excluir perfil", key=f"perfil_{perfil_id}_excluir",
+            disabled=bool(perfil["sistema"]) or not confirmar_exclusao,
+        )
 
     if salvar:
         try:
             atualizar_perfil(perfil_id, nome, descricao, ativo, permissao_ids, admin["id"])
-            st.success("Perfil atualizado.")
-            st.rerun()
+            recarregar_com_feedback('Perfil atualizado.')
         except (ValueError, PermissionError, mysql.connector.Error) as erro:
             st.error(str(erro))
     if excluir:
         try:
             excluir_perfil(perfil_id, admin["id"])
-            st.success("Perfil excluído.")
-            st.rerun()
+            recarregar_com_feedback('Perfil excluído.')
         except (ValueError, PermissionError, mysql.connector.Error) as erro:
             st.error(str(erro))
 
 
 def painel_perfil_usuario_admin(admin):
+    if not usuario_tem_permissao(admin["id"], "usuarios.gerenciar"):
+        st.error("Seu perfil não permite editar contas de usuário.")
+        return
     usuario_id = st.session_state.get("usuario_admin_aberto")
     conta = buscar_usuario_por_id(usuario_id, executor_id=admin["id"]) if usuario_id else None
     if not conta:
@@ -3020,6 +2401,7 @@ def painel_perfil_usuario_admin(admin):
         st.error("Somente um administrador pode alterar uma conta administrativa.")
         return
 
+    st.button("← Voltar para usuários", on_click=fechar_perfil_usuario_admin)
     st.markdown(f"#### Perfil de {conta['nome']} {conta.get('sobrenome') or ''}".strip())
     m1, m2, m3 = st.columns(3)
     m1.metric("Perfil", conta.get("perfil_nome") or "Não informado")
@@ -3107,22 +2489,15 @@ def painel_perfil_usuario_admin(admin):
                         departamento=novo_departamento, departamento_id=novo_departamento_id, cargo=novo_cargo,
                         autor_id=admin["id"], perfil_id=novo_perfil_id,
                     )
-                    st.success("Perfil atualizado.")
-                    st.rerun()
+                    recarregar_com_feedback('Perfil atualizado.')
                 except ValueError as erro:
                     st.error(str(erro))
 
-    acoes, fechar = st.columns(2)
-    with acoes:
-        if conta["id"] != admin["id"]:
+    if conta["id"] != admin["id"]:
+        with st.expander("Anonimizar os dados desta conta"):
+            st.warning("A anonimização é permanente. Confira a conta antes de confirmar.")
             confirmar_exclusao = st.checkbox("Confirmo a anonimização permanente desta conta e de seus dados associados.")
-            st.button(
-                "Anonimizar usuário", disabled=not confirmar_exclusao,
-                on_click=excluir_perfil_usuario_admin,
-                args=(conta["id"], admin["id"]),
-            )
-    with fechar:
-        st.button("Voltar para usuários", on_click=fechar_perfil_usuario_admin)
+            st.button("Anonimizar usuário", disabled=not confirmar_exclusao, on_click=excluir_perfil_usuario_admin, args=(conta["id"], admin["id"]))
 
     if conta["id"] != admin["id"]:
         with st.expander("Zona de perigo — excluir conta", expanded=False):
@@ -3160,14 +2535,7 @@ def tela_admin(usuario):
     pode_visualizar_usuarios = usuario_tem_permissao(usuario["id"], "usuarios.visualizar")
     pode_gerenciar_usuarios = usuario_tem_permissao(usuario["id"], "usuarios.gerenciar")
     pode_visualizar_relatorios = usuario_tem_permissao(usuario["id"], "relatorios.visualizar")
-    usuarios = (
-        listar_usuarios(
-            limite=5000 if pode_visualizar_relatorios else 200,
-            executor_id=usuario["id"],
-            para_relatorio=pode_visualizar_relatorios,
-        )
-        if pode_visualizar_usuarios or pode_visualizar_relatorios else []
-    )
+    usuarios = []
 
     opcoes_navegacao = []
     if pode_visualizar_usuarios or pode_gerenciar_usuarios:
@@ -3196,7 +2564,7 @@ def tela_admin(usuario):
     # As áreas administrativas ficam na lateral para manter a área principal
     # dedicada ao conteúdo e evitar uma segunda navegação horizontal.
     with st.sidebar:
-        st.markdown('<div class="sidebar-section">Administração</div>', unsafe_allow_html=True)
+        st.caption("Administração")
         navegacao = st.radio(
             "Seções administrativas",
             opcoes_navegacao,
@@ -3208,38 +2576,49 @@ def tela_admin(usuario):
         chamados = listar_chamados(limite=5000, executor_id=usuario["id"], para_relatorio=True)
         hoje = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
         st.subheader("Painel de indicadores")
-        st.caption("Acompanhe a operação por período. Os filtros se aplicam a todos os painéis abaixo.")
-        filtro_periodo, resumo_periodo = st.columns([1, 2])
-        with filtro_periodo:
-            periodo = st.date_input(
-                "Período dos indicadores",
-                value=(hoje.replace(day=1), hoje),
-                max_value=hoje,
-            )
-        if isinstance(periodo, tuple) and len(periodo) == 2:
-            inicio, fim = periodo
-            chamados = [c for c in chamados if c.get("criado_em") and inicio <= c["criado_em"].date() <= fim]
-        with resumo_periodo:
-            st.metric("Chamados no período", len(chamados))
+        st.caption("Chamados filtrados pela data de abertura. Indicadores operacionais usam a situação atual desse recorte.")
+        if len(chamados) == 5000:
+            st.warning("A consulta atingiu o limite de 5.000 registros mais recentes. O recorte pode estar incompleto.")
+        periodo = st.date_input(
+            "Período de abertura", value=(hoje.replace(day=1), hoje), max_value=hoje,
+            key="dashboard_periodo",
+        )
+        if not isinstance(periodo, (tuple, list)) or len(periodo) != 2:
+            st.info("Selecione a data inicial e a data final para atualizar os indicadores.")
+            return
+        inicio, fim = periodo
+        chamados = [c for c in chamados if c.get("criado_em") and inicio <= c["criado_em"].date() <= fim]
+        with st.expander("Filtros avançados do dashboard", expanded=False):
+            departamentos = ["Todos"] + sorted({_departamento_relatorio(c) for c in chamados})
+            departamento = st.selectbox("Departamento do solicitante", departamentos, key="dashboard_departamento")
+            equipes = ["Todas"] + sorted({c.get("equipe_destino") or "Sem equipe" for c in chamados})
+            equipe = st.selectbox("Equipe responsável", equipes, key="dashboard_equipe")
+        if departamento != "Todos":
+            chamados = [c for c in chamados if _departamento_relatorio(c) == departamento]
+        if equipe != "Todas":
+            chamados = [c for c in chamados if (c.get("equipe_destino") or "Sem equipe") == equipe]
+        st.caption(f"{inicio:%d/%m/%Y} a {fim:%d/%m/%Y} · Departamento: {departamento} · Equipe: {equipe} · {len(chamados)} chamado(s)")
+        st.caption("O recorte de chamados vale para Executivo, Visão geral e Operação e SLA. Pessoas mostra o cadastro atual; IA e conhecimento informa seu próprio escopo.")
 
-        visao_geral, operacao_sla, pessoas, inteligencia = st.tabs([
-            "Visão geral", "Operação e SLA", "Pessoas", "IA e conhecimento",
-        ])
-        with visao_geral:
+        painel = st.segmented_control("Painel", ["Executivo", "Visão geral", "Operação e SLA", "Pessoas", "IA e conhecimento"], default="Executivo", required=True, key="dashboard_painel")
+        if painel == "Executivo":
+            relatorio_executivo_suporte(chamados, usuario)
+        if painel == "Visão geral":
             relatorio_operacional(chamados, usuario)
             st.divider()
             relatorio_chamados_abertos_por_departamento(chamados)
             st.divider()
             relatorio_demanda_por_departamento_categoria(chamados)
-        with operacao_sla:
+        if painel == "Operação e SLA":
             relatorio_sla_desempenho(chamados)
             st.divider()
             relatorio_produtividade_equipe(chamados)
             st.divider()
             relatorio_cancelamentos(chamados)
-        with pessoas:
+        if painel == "Pessoas":
+            usuarios = listar_usuarios(limite=5000, executor_id=usuario["id"], para_relatorio=True)
             relatorio_usuarios(usuarios)
-        with inteligencia:
+        if painel == "IA e conhecimento":
             relatorio_ia(chamados, usuario)
             with st.expander("Adicionar caso anonimizado para avaliação da IA"):
                 st.caption("Use apenas relatos reais já anonimizados e revisados. Estes casos medem a IA; não entram na base RAG.")
@@ -3268,6 +2647,46 @@ def tela_admin(usuario):
             st.divider()
             relatorio_aprendizado_por_casos(usuario)
 
+        if usuario_eh_administrador(usuario["id"]):
+            with st.expander("Dados provisórios para demonstração", expanded=False):
+                st.caption(
+                    "Insere 12 chamados sintéticos identificados como **[DEMO DASHBOARD]**, com SLA, "
+                    "status, avaliações e mensagens simuladas. A massa usa Ana Oliveira como solicitante e Pedro/João como analistas, sem criar novas contas."
+                )
+                demo_coluna, recriar_coluna, atualizar_coluna, remover_coluna = st.columns(4)
+                with demo_coluna:
+                    if st.button("Inserir dados provisórios", key="inserir_demo_dashboard"):
+                        try:
+                            quantidade = inserir_dados_demonstracao_dashboard(usuario["id"])
+                            if quantidade:
+                                st.success(f"{quantidade} registros provisórios inseridos no dashboard.")
+                            else:
+                                st.info("Os dados provisórios já estão inseridos.")
+                            st.rerun()
+                        except (ValueError, PermissionError, mysql.connector.Error) as erro:
+                            st.error(f"Não foi possível inserir os dados provisórios: {erro}")
+                with recriar_coluna:
+                    if st.button("Recriar dados completos", key="recriar_demo_dashboard"):
+                        try:
+                            quantidade = recriar_dados_demonstracao_dashboard(usuario["id"])
+                            recarregar_com_feedback(f'{quantidade} registros provisórios recriados com usuários, analistas e mensagens.')
+                        except (ValueError, PermissionError, mysql.connector.Error) as erro:
+                            st.error(f"Não foi possível recriar os dados provisórios: {erro}")
+                with atualizar_coluna:
+                    if st.button("Corrigir departamentos", key="atualizar_demo_departamentos"):
+                        try:
+                            quantidade = atualizar_departamentos_dados_demonstracao_dashboard(usuario["id"])
+                            recarregar_com_feedback(f'{quantidade} registro(s) provisório(s) atualizado(s) com departamento.')
+                        except (ValueError, PermissionError, mysql.connector.Error) as erro:
+                            st.error(f"Não foi possível corrigir os departamentos: {erro}")
+                with remover_coluna:
+                    if st.button("Remover somente dados provisórios", key="remover_demo_dashboard"):
+                        try:
+                            quantidade = remover_dados_demonstracao_dashboard(usuario["id"])
+                            recarregar_com_feedback(f'{quantidade} registro(s) provisório(s) removido(s). Dados reais não foram alterados.')
+                        except (ValueError, PermissionError, mysql.connector.Error) as erro:
+                            st.error(f"Não foi possível remover os dados provisórios: {erro}")
+
     if navegacao == "Auditoria":
         painel_auditoria_admin(usuario)
 
@@ -3285,15 +2704,21 @@ def tela_admin(usuario):
         painel_sla_admin(usuario)
 
     if navegacao == "Usuários":
+        if pode_visualizar_usuarios or pode_visualizar_relatorios:
+            usuarios = listar_usuarios(limite=200, executor_id=usuario["id"], para_relatorio=pode_visualizar_relatorios)
         if st.session_state.get("mensagem_admin"):
             st.success(st.session_state.pop("mensagem_admin"))
-        if pode_gerenciar_usuarios:
-            with st.expander("Cadastrar usuário", expanded=False):
+        modo_usuarios = st.segmented_control("Gerenciar pessoas", ["Consultar", "Cadastrar"] if pode_gerenciar_usuarios else ["Consultar"], default="Consultar", required=True, key="usuarios_modo")
+        if pode_gerenciar_usuarios and modo_usuarios == "Cadastrar":
+            with st.container(border=True):
                 with st.form("form_novo_usuario", clear_on_submit=True):
                     departamentos_ativos = listar_departamentos(apenas_ativos=True)
                     departamentos_por_id = {departamento["id"]: departamento for departamento in departamentos_ativos}
                     perfis_ativos = listar_perfis_para_atribuicao(usuario["id"])
                     perfis_por_id = {perfil["id"]: perfil for perfil in perfis_ativos}
+                    if not perfis_por_id:
+                        st.info("Nenhum perfil disponível para atribuição. Revise as permissões de gerenciamento.")
+                        return
                     col1, col2 = st.columns(2)
                     with col1:
                         nome = st.text_input("Nome")
@@ -3343,10 +2768,12 @@ def tela_admin(usuario):
                                 departamento=departamento, departamento_id=departamento_id, cargo=cargo or None,
                                 autor_id=usuario["id"], perfil_id=perfil_id,
                             )
-                            st.success(f"Usuário {email} cadastrado no perfil '{perfis_por_id[perfil_id]['nome']}'.")
-                            st.rerun()
+                            recarregar_com_feedback(f"Usuário {email} cadastrado no perfil '{perfis_por_id[perfil_id]['nome']}'.")
                         except ValueError as erro:
                             st.error(str(erro))
+
+        if modo_usuarios == "Cadastrar":
+            return
 
         if usuarios:
             filtro_usuario = st.text_input("Buscar por nome, e-mail ou perfil", key="filtro_usuarios").strip().lower()
@@ -3355,21 +2782,7 @@ def tela_admin(usuario):
                 if not filtro_usuario or filtro_usuario in f"{u['nome']} {u['email']} {u.get('perfil_nome') or ''}".lower()
             ]
             st.caption(f"{len(usuarios_filtrados)} conta(s) encontrada(s).")
-            cabecalho_tabela = st.columns([2, 2.4, 1, 1.4, 1])
-            for coluna, texto in zip(cabecalho_tabela, ["Nome", "E-mail", "Perfil", "Último login", "Ação"]):
-                coluna.markdown(f"**{texto}**")
-            for conta in usuarios_filtrados:
-                col_nome, col_email, col_papel, col_login, col_acao = st.columns([2, 2.4, 1, 1.4, 1])
-                col_nome.write(f"{conta['nome']} {conta.get('sobrenome') or ''}".strip())
-                col_email.write(conta["email"])
-                col_papel.write(conta.get("perfil_nome") or "Sem perfil")
-                ultimo_login = conta.get("ultimo_login")
-                col_login.write(para_horario_local(ultimo_login).strftime("%d/%m/%Y %H:%M") if ultimo_login else "Nunca acessou")
-                if pode_gerenciar_usuarios:
-                    col_acao.button(
-                        "Abrir perfil", key=f"abrir_usuario_{conta['id']}",
-                        on_click=abrir_perfil_usuario_admin, args=(conta["id"],),
-                    )
+            tabela_usuarios(usuarios_filtrados, pode_gerenciar_usuarios, abrir_perfil_usuario_admin, para_horario_local)
 
         else:
             st.info("Nenhum usuário cadastrado.")
@@ -3406,35 +2819,23 @@ def secao_configurar_autenticador(usuario):
                         st.error("Código incorreto. Tente novamente.")
 
 
-PAGINAS_POR_PERMISSAO = {
-    "usuario": ("chamados.visualizar_proprios", "pages/1_Portal_Usuario.py", "Portal do usuário", "🏠"),
-    "analista": ("chamados.visualizar_fila", "pages/2_Atendimento.py", "Atendimento", "🛠️"),
-    "admin": ("administracao.acessar", "pages/3_Administracao.py", "Administração", "🛡️"),
-}
 
 
 def paginas_permitidas_usuario(usuario):
     """Retorna as páginas cuja permissão está ativa no perfil atual do usuário."""
-    return {
-        chave: dados
-        for chave, dados in PAGINAS_POR_PERMISSAO.items()
-        if usuario_tem_permissao(usuario["id"], dados[0])
-    }
+    return paginas_autorizadas(lambda permissao: usuario_tem_permissao(usuario["id"], permissao))
 
 
 def exibir_navegacao(usuario):
     """Monta links de página conforme as permissões efetivas do perfil."""
     paginas_permitidas = paginas_permitidas_usuario(usuario)
     with st.sidebar:
-        st.markdown("""
-        <div class="sidebar-brand">
-            <div class="sidebar-brand__eyebrow">Service desk</div>
-            <div class="sidebar-brand__name">Central de Chamados</div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.markdown(f"**{usuario['nome']}**")
+        st.caption("SERVICE DESK")
+        st.markdown("### Central de Chamados")
+        st.write(usuario['nome'])
         st.divider()
-        st.markdown('<div class="sidebar-section">Navegação</div>', unsafe_allow_html=True)
+        st.caption("Áreas disponíveis")
+
 
         for _chave, (_permissao, pagina, rotulo, icone) in paginas_permitidas.items():
             st.page_link(pagina, label=rotulo, icon=icone)
@@ -3448,15 +2849,22 @@ def exibir_acoes_sessao(usuario):
             st.divider()
             secao_configurar_autenticador(usuario)
         st.divider()
-        if st.button("Sair", use_container_width=True):
+        if st.button("Sair", width="stretch"):
             sair()
 
 
 def _executar_aplicacao_legacy(pagina_solicitada=None):
-    if not schema_pronto():
+    """Autenticação e autorização precedem qualquer tela de trabalho."""
+    try:
+        pronto = schema_pronto()
+    except mysql.connector.Error:
+        st.error("Não conseguimos conectar ao banco de dados. Verifique se o MySQL está em execução e tente novamente.")
+        if st.button("Tentar conectar novamente"):
+            st.rerun()
+        return
+    if not pronto:
         st.error("O banco não está atualizado. Um administrador deve executar `python migrations.py upgrade` em uma janela de manutenção.")
         return
-    """Centraliza autenticação, autorização e a tela de cada página Streamlit."""
     inicializar_estado_sessao()
     if st.session_state.usuario_pendente_2fa is not None:
         tela_2fa()
@@ -3487,10 +2895,13 @@ def _executar_aplicacao_legacy(pagina_solicitada=None):
         st.session_state.aceite_privacidade_validado = True
 
     if pagina_solicitada is None:
-        paginas_permitidas = paginas_permitidas_usuario(usuario)
-        for chave in ("admin", "analista", "usuario"):
-            if chave in paginas_permitidas:
-                st.switch_page(paginas_permitidas[chave][1])
+        destino, secao = destino_inicial(lambda permissao: usuario_tem_permissao(usuario["id"], permissao))
+        if destino:
+            if secao:
+                st.session_state[{"admin": "admin_nav", "analista": "analista_nav", "usuario": "usuario_nav"}[destino]] = secao
+            st.switch_page(PAGINAS_POR_PERMISSAO[destino][1])
+
+
         st.error("Seu perfil não possui acesso a nenhuma área do sistema. Contate o administrador.")
         return
 
@@ -3501,12 +2912,19 @@ def _executar_aplicacao_legacy(pagina_solicitada=None):
         st.page_link("app.py", label="Voltar ao login", icon="🔐")
         return
 
-    if pagina_solicitada == "usuario":
-        tela_usuario(usuario)
-    elif pagina_solicitada == "analista":
-        tela_analista(usuario)
-    elif pagina_solicitada == "admin":
-        tela_admin(usuario)
+    try:
+        if pagina_solicitada == "usuario":
+            tela_usuario(usuario)
+        elif pagina_solicitada == "analista":
+            tela_analista(usuario)
+        elif pagina_solicitada == "admin":
+            tela_admin(usuario)
+    except PermissionError:
+        st.error("Sua permissão para esta operação não está disponível. Atualize a página ou solicite a revisão do acesso.")
+    except ValueError as erro:
+        st.error(str(erro))
+    except mysql.connector.Error:
+        st.error("Não foi possível concluir a operação no banco. Seus filtros foram mantidos; tente novamente.")
 
     exibir_acoes_sessao(usuario)
 

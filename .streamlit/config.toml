@@ -1,2 +1,8 @@
 [client]
 showSidebarNavigation = false
+
+[server]
+# O observador de módulos inspeciona imports opcionais do transformers e gera
+# tracebacks de dependências multimodais que este sistema não utiliza.
+# Após editar código Python, reinicie o aplicativo pelo BAT.
+fileWatcherType = "none"

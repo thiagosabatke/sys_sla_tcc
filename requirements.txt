@@ -3,7 +3,7 @@ mysql-connector-python
 sentence-transformers
 numpy
 python-dotenv
-streamlit
+streamlit>=1.61.1
 pandas
 matplotlib
 bcrypt

@@ -9,7 +9,7 @@ MATRIZ_SLA_MINUTOS = {
     "Media": {"resposta": 240, "resolucao": 1440}, "Baixa": {"resposta": 480, "resolucao": 4320},
 }
 LIMIAR_RISCO = 0.8
-CONFIGURACAO_PADRAO = {"usar_horario_comercial": True, "dias_uteis": [0, 1, 2, 3, 4], "hora_inicio": "08:00", "hora_fim": "18:00", "limiar_risco": LIMIAR_RISCO, "horas_fechamento_automatico": 72, "matriz": MATRIZ_SLA_MINUTOS}
+CONFIGURACAO_PADRAO = {"usar_horario_comercial": True, "dias_uteis": [0, 1, 2, 3, 4], "hora_inicio": "08:00", "hora_fim": "18:00", "limiar_risco": LIMIAR_RISCO, "horas_fechamento_automatico": 72, "limite_chamados_ativos_por_usuario": 5, "matriz": MATRIZ_SLA_MINUTOS}
 CORES_SLA = {"Dentro do prazo": "#15803d", "Em risco": "#a16207", "Violado": "#dc2626", "Cumprido": "#15803d", "Pausado": "#5b3f88", "Não aplicável": "#50535a"}
 
 
@@ -33,7 +33,7 @@ def normalizar_configuracao(configuracao=None):
         configuracao = None
     configuracao = configuracao or {}
     matriz = configuracao.get("matriz") or MATRIZ_SLA_MINUTOS
-    return {"usar_horario_comercial": bool(configuracao.get("usar_horario_comercial", True)), "dias_uteis": sorted({int(d) for d in configuracao.get("dias_uteis", [0, 1, 2, 3, 4]) if 0 <= int(d) <= 6}), "hora_inicio": str(configuracao.get("hora_inicio", "08:00"))[:5], "hora_fim": str(configuracao.get("hora_fim", "18:00"))[:5], "limiar_risco": float(configuracao.get("limiar_risco", LIMIAR_RISCO)), "horas_fechamento_automatico": int(configuracao.get("horas_fechamento_automatico", 72)), "matriz": matriz}
+    return {"usar_horario_comercial": bool(configuracao.get("usar_horario_comercial", True)), "dias_uteis": sorted({int(d) for d in configuracao.get("dias_uteis", [0, 1, 2, 3, 4]) if 0 <= int(d) <= 6}), "hora_inicio": str(configuracao.get("hora_inicio", "08:00"))[:5], "hora_fim": str(configuracao.get("hora_fim", "18:00"))[:5], "limiar_risco": float(configuracao.get("limiar_risco", LIMIAR_RISCO)), "horas_fechamento_automatico": int(configuracao.get("horas_fechamento_automatico", 72)), "limite_chamados_ativos_por_usuario": max(1, int(configuracao.get("limite_chamados_ativos_por_usuario", 5))), "matriz": matriz}
 
 
 def _hora(valor):

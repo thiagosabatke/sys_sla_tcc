@@ -1,0 +1,215 @@
+# Inventário da sessão antes da refatoração
+
+Referências de pages/_telas.py no início da alteração; as linhas referem-se à versão anterior. Load lê, Store altera. Chaves dinâmicas conservam a expressão original.
+
+## Chaves acrescentadas na revisão completa
+
+- `ui_notificacao`: inicializada após uma operação confirmada e consumida na próxima renderização; descartada ao sair.
+- `ui_limpar_prefixos`: agenda a limpeza de campos do cadastro de perfil antes de recriar seus widgets; consumida na inicialização da próxima execução.
+- `pagina_meus_{grupo}`, `pagina_fila_ativa`, `pagina_historico`, `pagina_cancelados`: posição das listas, limitada ao número de páginas disponíveis.
+- `busca_meus_{grupo}`, `busca_historico`, `busca_cancelados`: busca no recorte autorizado de chamados.
+- `dashboard_painel`, `usuarios_modo`, `departamentos_modo`, `perfis_modo`: escolha da tarefa ou painel; inicialização pelos respectivos componentes.
+- `departamentos_busca`, `departamento_edicao`, `auditoria_busca_pagina`, `tabela_usuarios_admin`: busca e seleção nos componentes administrativos.
+- `titular_privacidade_email`: identificador obtido da busca autorizada, usado para revalidar a seleção. É limpo antes de nova busca e ao sair; não contém CPF, senha ou segredo.
+
+Todas essas chaves são descartadas por `limpar_sessao()` ao encerrar o acesso. As chaves anteriores de autenticação, navegação, conversa e seleção foram preservadas.
+
+## Acessos explícitos e dinâmicos
+
+- L1002: st.session_state[chave] — Store
+- L1028: st.session_state.usuario_pendente_2fa — Store
+- L1044: st.session_state.usuario_logado — Store
+- L1046: st.session_state.login_auditoria_registrada — Store
+- L1050: st.session_state.tela_atual — Store
+- L1056: st.session_state.usuario_pendente_2fa — Load
+- L1079: st.session_state.usuario_logado — Store
+- L1080: st.session_state.usuario_pendente_2fa — Store
+- L1082: st.session_state.login_auditoria_registrada — Store
+- L1089: st.session_state.usuario_pendente_2fa — Store
+- L1119: st.session_state.email_recuperacao — Store
+- L1120: st.session_state.tela_atual — Store
+- L1125: st.session_state.tela_atual — Store
+- L1134: st.session_state.email_recuperacao — Load
+- L1143: st.session_state.email_recuperacao — Load
+- L1155: st.session_state.tela_atual — Store
+- L1156: st.session_state.email_recuperacao — Store
+- L1165: st.session_state.tela_atual — Store
+- L1170: st.session_state.get — Load
+- L1170: st.session_state.get('usuario_logado') — chamada
+- L1173: st.session_state.usuario_logado — Store
+- L1174: st.session_state.login_auditoria_registrada — Store
+- L1175: st.session_state.aceite_privacidade_validado — Store
+- L1181: st.session_state.pop — Load
+- L1181: st.session_state.pop(chave, None) — chamada
+- L1225: st.session_state[chave_download] — Store
+- L1230: st.session_state.get — Load
+- L1230: st.session_state.get(chave_download) — chamada
+- L1374: st.session_state.get — Load
+- L1374: st.session_state.get('usuario_nav') — chamada
+- L1375: st.session_state.usuario_nav — Store
+- L1396: st.session_state.chat_mensagens — Store
+- L1400: st.session_state.chat_resultado_final — Store
+- L1403: st.session_state.chat_mensagens — Store
+- L1406: st.session_state.chat_resultado_final — Store
+- L1409: st.session_state.chat_mensagens — Load
+- L1424: st.session_state.chat_resultado_final — Load
+- L1427: st.session_state.chat_mensagens — Load
+- L1430: st.session_state.chat_mensagens — Load
+- L1435: st.session_state.chat_mensagens — Load
+- L1439: st.session_state.chat_mensagens — Load
+- L1443: st.session_state.chat_mensagens — Load
+- L1444: st.session_state.chat_resultado_final — Store
+- L1454: st.session_state.chat_mensagens — Load
+- L1459: st.session_state.chat_resultado_final — Store
+- L1467: st.session_state.chat_resultado_final — Load
+- L1493: st.session_state.chat_mensagens — Load
+- L1497: st.session_state.chat_resultado_final — Store
+- L1500: st.session_state.chat_resultado_final — Store
+- L1541: st.session_state.chat_resultado_final — Store
+- L1572: st.session_state.chat_resultado_final — Load
+- L1601: st.session_state.chamado_aberto_usuario — Load
+- L1605: st.session_state.chamado_aberto_usuario — Store
+- L1609: st.session_state.chamado_aberto_usuario — Load
+- L1649: st.session_state.get — Load
+- L1649: st.session_state.get(chave_formulario) — chamada
+- L1651: st.session_state[chave_formulario] — Store
+- L1661: st.session_state[chave_formulario] — Store
+- L1666: st.session_state[chave_formulario] — Store
+- L1709: st.session_state.get — Load
+- L1709: st.session_state.get('analista_nav') — chamada
+- L1710: st.session_state.analista_nav — Store
+- L1805: st.session_state.chamado_selecionado_analista — Load
+- L1810: st.session_state.chamado_selecionado_analista — Store
+- L1814: st.session_state.chamado_selecionado_analista — Load
+- L1822: st.session_state.chamado_selecionado_analista — Store
+- L1841: st.session_state[f"mostrar_cancelamento_analista_{chamado['id']}"] — Store
+- L1964: st.session_state.get — Load
+- L1964: st.session_state.get(chave_cancelamento_analista) — chamada
+- L1976: st.session_state[chave_cancelamento_analista] — Store
+- L1981: st.session_state[chave_cancelamento_analista] — Store
+- L2046: st.session_state.get — Load
+- L2046: st.session_state.get('chamado_selecionado_historico') — chamada
+- L2049: st.session_state.chamado_selecionado_historico — Store
+- L2053: st.session_state.get — Load
+- L2053: st.session_state.get('chamado_selecionado_historico') — chamada
+- L2061: st.session_state.chamado_selecionado_historico — Store
+- L2114: st.session_state.chamado_selecionado_cancelado — Load
+- L2118: st.session_state.chamado_selecionado_cancelado — Store
+- L2122: st.session_state.chamado_selecionado_cancelado — Load
+- L2451: st.session_state.usuario_admin_aberto — Store
+- L2452: st.session_state.admin_nav — Store
+- L2456: st.session_state.usuario_admin_aberto — Store
+- L2457: st.session_state.admin_nav — Store
+- L2462: st.session_state.usuario_admin_aberto — Store
+- L2463: st.session_state.admin_nav — Store
+- L2464: st.session_state.mensagem_admin — Store
+- L2483: st.session_state.titular_privacidade_id — Store
+- L2513: st.session_state.aceite_privacidade_validado — Store
+- L2518: st.session_state.get — Load
+- L2518: st.session_state.get('titular_privacidade_id') — chamada
+- L2523: st.session_state.pop — Load
+- L2523: st.session_state.pop('titular_privacidade_id', None) — chamada
+- L2535: st.session_state[chave_exportacao] — Store
+- L2542: st.session_state[chave_exportacao] — Load
+- L2544: st.session_state.pop — Load
+- L2544: st.session_state.pop(chave_exportacao, None) — chamada
+- L2566: st.session_state.pop — Load
+- L2566: st.session_state.pop('titular_privacidade_id', None) — chamada
+- L3243: st.session_state[f"{chave}_{item['id']}"] — Store
+- L3258: st.session_state.pop — Load
+- L3258: st.session_state.pop(f"novo_perfil_{permissao['id']}", None) — chamada
+- L3259: st.session_state.pop — Load
+- L3259: st.session_state.pop('novo_perfil_nome', None) — chamada
+- L3260: st.session_state.pop — Load
+- L3260: st.session_state.pop('novo_perfil_descricao', None) — chamada
+- L3332: st.session_state.get — Load
+- L3332: st.session_state.get('usuario_admin_aberto') — chamada
+- L3464: st.session_state.usuario_admin_aberto — Store
+- L3465: st.session_state.mensagem_admin — Store
+- L3504: st.session_state.get — Load
+- L3504: st.session_state.get('usuario_admin_aberto') — chamada
+- L3512: st.session_state.get — Load
+- L3512: st.session_state.get('admin_nav') — chamada
+- L3513: st.session_state.admin_nav — Store
+- L3649: st.session_state.get — Load
+- L3649: st.session_state.get('mensagem_admin') — chamada
+- L3650: st.session_state.pop — Load
+- L3650: st.session_state.pop('mensagem_admin') — chamada
+- L3749: st.session_state.totp_secret_temp — Store
+- L3752: st.session_state.totp_secret_temp — Store
+- L3755: st.session_state.totp_secret_temp — Load
+- L3756: st.session_state.totp_secret_temp — Load
+- L3760: st.session_state.totp_secret_temp — Load
+- L3761: st.session_state.totp_secret_temp — Load
+- L3762: st.session_state.totp_secret_temp — Store
+- L3764: st.session_state.usuario_logado — Load
+- L3822: st.session_state.usuario_pendente_2fa — Load
+- L3826: st.session_state.usuario_logado — Load
+- L3830: st.session_state.tela_atual — Load
+- L3832: st.session_state.tela_atual — Load
+- L3838: st.session_state.usuario_logado — Load
+- L3840: st.session_state.login_auditoria_registrada — Load
+- L3842: st.session_state.login_auditoria_registrada — Store
+- L3844: st.session_state.aceite_privacidade_validado — Load
+- L3848: st.session_state.aceite_privacidade_validado — Store
+
+## Chaves dos componentes
+
+- L843: chave_botao
+- L848: chave_botao
+- L968: lambda item: item[0] or datetime.min
+- L1203: f"{key_prefix}_chat_{chamado['id']}"
+- L1223: f"{key_prefix}_preparar_{anexo['id']}"
+- L1232: f"{key_prefix}_baixar_{anexo['id']}"
+- L1243: f"{key_prefix}_anexo_{chamado['id']}"
+- L1298: 'busca_portal_artigos'
+- L1305: 'filtro_categoria_artigos'
+- L1378: 'usuario_nav'
+- L1573: 'nova_conversa_durante_atendimento'
+- L1650: f"cancelar_{chamado['id']}"
+- L1713: 'analista_nav'
+- L1729: lambda c: (prioridade_sla.get(sla.pior_status(sla.status_sla(c)), 5), ordem_urgencia.get(c.get('urgencia'), 4), c.get('criado_em'))
+- L1748: 'busca_chamado_ativa'
+- L1754: 'filtro_status_ativa'
+- L1756: 'filtro_urgencia_ativa'
+- L1763: 'filtro_categoria_ativa'
+- L1766: 'filtro_departamento_ativa'
+- L1769: 'filtro_analista_ativa'
+- L1771: 'filtro_sla_ativa'
+- L1776: 'somente_meus_ativa'
+- L1840: f"cancelar_analista_{chamado['id']}"
+- L1967: f"motivo_cancelamento_analista_{chamado['id']}"
+- L2028: 'filtro_urgencia_hist'
+- L2030: 'somente_meus_hist'
+- L2470: 'privacidade_identificador'
+- L2471: 'privacidade_localizar'
+- L2533: f'privacidade_gerar_{titular_id}'
+- L2555: f'privacidade_confirmar_{titular_id}'
+- L2559: f'privacidade_anonimizar_{titular_id}'
+- L2667: f'sla_resp_{urgencia}'
+- L2669: f'sla_res_{urgencia}'
+- L2694: 'auditoria_periodo'
+- L2914: 'pareto_prioridade'
+- L3119: 'dashboard_departamento_categoria'
+- L3211: lambda item: (item['codigo'] != permissao_base, item['nome'])
+- L3233: f"{chave}_{permissao['id']}"
+- L3249: 'novo_perfil_nome'
+- L3250: 'novo_perfil_descricao'
+- L3253: 'novo_perfil_cadastrar'
+- L3284: f'perfil_{perfil_id}_nome'
+- L3288: f'perfil_{perfil_id}_descricao'
+- L3292: f'perfil_{perfil_id}_ativo'
+- L3302: f'perfil_{perfil_id}_salvar'
+- L3306: f'perfil_{perfil_id}_confirmar_exclusao'
+- L3310: f'perfil_{perfil_id}_excluir'
+- L3448: f"usuario_{conta['id']}_confirmar_exclusao_definitiva"
+- L3452: f"usuario_{conta['id']}_excluir_definitivamente"
+- L3518: 'admin_nav'
+- L3533: 'inserir_demo_dashboard'
+- L3544: 'recriar_demo_dashboard'
+- L3552: 'atualizar_demo_departamentos'
+- L3560: 'remover_demo_dashboard'
+- L3620: 'executar_avaliacao_ia'
+- L3713: 'filtro_usuarios'
+- L3730: f"abrir_usuario_{conta['id']}"
+- L3758: 'confirma_totp'
