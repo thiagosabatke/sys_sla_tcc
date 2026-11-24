@@ -5,7 +5,7 @@ import unittest
 import importlib
 from pathlib import Path
 from types import ModuleType
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 # Permite executar este arquivo diretamente, além do unittest discovery/pytest.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -144,6 +144,31 @@ class TestesAutorizacaoPerfis(unittest.TestCase):
                 limite=10, executor_id=42, para_relatorio=True,
             )
         self.assertEqual(chamados, [])
+
+    def test_consulta_fechados_combina_titular_status_e_paginacao(self):
+        conexao = MagicMock()
+        conexao.cursor.return_value.fetchall.return_value = []
+        with patch.object(database, "exigir_permissao") as exigir, \
+             patch.object(database, "conectar", return_value=conexao):
+            database.listar_chamados(limite=200, usuario_id=42, executor_id=42, pagina=2, status="Fechado")
+        exigir.assert_called_once_with(42, "chamados.visualizar_proprios")
+        consulta, parametros = conexao.cursor.return_value.execute.call_args.args
+        self.assertIn("WHERE c.usuario_id = %s AND c.status = %s", consulta)
+        self.assertIn("ORDER BY c.criado_em DESC, c.id DESC", consulta)
+        self.assertEqual(parametros, (42, "Fechado", 200, 400))
+
+    def test_consulta_fechados_exige_acesso_a_fila(self):
+        with patch.object(database, "exigir_permissao", side_effect=PermissionError("Sem acesso")), \
+             patch.object(database, "conectar") as conectar:
+            with self.assertRaises(PermissionError):
+                database.listar_chamados(executor_id=42, status="Fechado")
+        conectar.assert_not_called()
+
+    def test_consulta_rejeita_filtro_de_status_invalido(self):
+        with patch.object(database, "conectar") as conectar:
+            with self.assertRaises(ValueError):
+                database.listar_chamados(executor_id=42, status="Fechado' OR 1=1")
+        conectar.assert_not_called()
 
     def test_gerenciamento_de_perfis_exige_permissao_especifica(self):
         with patch.object(database, "usuario_tem_permissao", return_value=False):

@@ -14,6 +14,7 @@ import mysql.connector
 from dotenv import load_dotenv
 
 import sla
+from demo_data import gerar_cenarios_demonstracao
 from observability import configurar_logging
 
 logger = logging.getLogger(__name__)
@@ -1401,149 +1402,128 @@ def salvar_chamado(titulo, descricao, categoria, urgencia, confiabilidade=None,
     return novo_id
 
 
-def inserir_dados_demonstracao_dashboard(autor_id):
-    """Cria chamados sintéticos, marcados para remoção exclusiva pelo painel admin."""
+def _participantes_demonstracao(cursor):
+    cursor.execute(
+        """SELECT u.id, u.nome, u.sobrenome, u.papel, u.departamento_id,
+                  COALESCE(d.nome, u.departamento) AS departamento, p.chave AS perfil_chave
+           FROM usuarios u JOIN perfis p ON p.id = u.perfil_id
+           LEFT JOIN departamentos d ON d.id = u.departamento_id
+           WHERE u.conta_anonimizada_em IS NULL AND p.ativo = TRUE
+             AND (u.departamento_id IS NULL OR d.ativo = TRUE)
+           ORDER BY u.departamento_id, u.id"""
+    )
+    usuarios = cursor.fetchall()
+    solicitantes, analistas = [], []
+    for usuario in usuarios:
+        usuario["nome_completo"] = f"{usuario['nome']} {usuario.get('sobrenome') or ''}".strip()
+        permissoes = permissoes_usuario(usuario["id"])
+        if {"chamados.abrir", "chamados.visualizar_proprios"} <= permissoes:
+            solicitantes.append(usuario)
+        if {"chamados.visualizar_fila", "chamados.assumir", "chamados.responder_atribuidos",
+                "chamados.registrar_resolucao"} <= permissoes:
+            analistas.append(usuario)
+    # Usa contas administrativas apenas quando não há participantes de outro perfil.
+    solicitantes = [u for u in solicitantes if u["perfil_chave"] != "administrador"] or solicitantes
+    analistas = [u for u in analistas if u["perfil_chave"] != "administrador"] or analistas
+    return solicitantes, analistas
+
+
+def _exigir_administrador_demonstracao(autor_id):
     exigir_permissao(autor_id, "relatorios.visualizar")
     if not usuario_eh_administrador(autor_id):
-        raise PermissionError("Somente administradores podem inserir dados provisórios.")
+        raise PermissionError("Somente administradores podem gerenciar chamados de demonstração.")
+
+
+def contar_dados_demonstracao_dashboard(autor_id):
+    _exigir_administrador_demonstracao(autor_id)
     conn = conectar()
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "SELECT COUNT(*) FROM chamados WHERE JSON_UNQUOTE(JSON_EXTRACT(metadados_ia, '$.origem')) = %s",
+            """SELECT COUNT(*) FROM chamados
+               WHERE JSON_UNQUOTE(JSON_EXTRACT(metadados_ia, '$.origem')) = %s
+                 AND JSON_EXTRACT(metadados_ia, '$.sintetico') = TRUE""",
             (MARCADOR_DADOS_DEMONSTRACAO_DASHBOARD,),
         )
-        if cursor.fetchone()[0]:
-            return 0
+        return cursor.fetchone()[0]
+    finally:
+        cursor.close()
+        conn.close()
 
-        def buscar_usuario_demo(email, nome, sobrenome):
-            cursor.execute(
-                """SELECT id, nome, sobrenome, email, papel FROM usuarios
-                   WHERE LOWER(email) = %s
-                      OR (LOWER(nome) = %s AND LOWER(COALESCE(sobrenome, '')) = %s)
-                   ORDER BY LOWER(email) = %s DESC LIMIT 1""",
-                (email, nome, sobrenome, email),
-            )
-            usuario = cursor.fetchone()
-            if not usuario:
-                raise ValueError(f"Não foi encontrado o usuário de demonstração: {email}.")
-            return {
-                "id": usuario[0], "nome": f"{usuario[1]} {usuario[2] or ''}".strip(),
-                "email": usuario[3], "papel": usuario[4],
-            }
 
-        ana = buscar_usuario_demo("ana.oliveira@gmail.com", "ana", "oliveira")
-        pedro = buscar_usuario_demo("pedro.gabriel@gmail.com", "pedro", "gabriel")
-        joao = buscar_usuario_demo("joao.silva@gmail.com", "joao", "silva")
-        if ana["papel"] != "usuario" or pedro["papel"] != "analista" or joao["papel"] != "analista":
-            raise ValueError("Ana deve ser usuário e Pedro/João devem estar cadastrados como analistas.")
+def _remover_cenarios_demonstracao(cursor):
+    cursor.execute(
+        """DELETE FROM chamados
+           WHERE JSON_UNQUOTE(JSON_EXTRACT(metadados_ia, '$.origem')) = %s
+             AND JSON_EXTRACT(metadados_ia, '$.sintetico') = TRUE""",
+        (MARCADOR_DADOS_DEMONSTRACAO_DASHBOARD,),
+    )
+    return cursor.rowcount
+
+
+def _gravar_dados_demonstracao_dashboard(autor_id, quantidade, substituir=False):
+    _exigir_administrador_demonstracao(autor_id)
+    if isinstance(quantidade, bool) or not isinstance(quantidade, int) or not 12 <= quantidade <= 500:
+        raise ValueError("Escolha uma quantidade entre 12 e 500 chamados por lote.")
+    configuracao = obter_configuracao_sla()
+    conn = conectar()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        solicitantes, analistas = _participantes_demonstracao(cursor)
         cursor.execute(
-            "UPDATE usuarios SET departamento = %s, departamento_id = NULL WHERE id = %s",
-            ("Recursos Humanos", ana["id"]),
+            """SELECT COUNT(*) AS total FROM chamados
+               WHERE JSON_UNQUOTE(JSON_EXTRACT(metadados_ia, '$.origem')) = %s
+                 AND JSON_EXTRACT(metadados_ia, '$.sintetico') = TRUE""",
+            (MARCADOR_DADOS_DEMONSTRACAO_DASHBOARD,),
         )
-        cursor.execute("UPDATE usuarios SET cargo = %s WHERE id = %s", ("Analista de Suporte N2", pedro["id"]))
-        cursor.execute("UPDATE usuarios SET cargo = %s WHERE id = %s", ("Analista de Suporte N1", joao["id"]))
-
-        agora = agora_utc().replace(minute=0, second=0, microsecond=0)
-        padroes = [
-            ("Acesso", "Suporte", "Media", "Fechado", 3, 2, 5, "Financeiro"),
-            ("Acesso", "Suporte", "Baixa", "Fechado", 8, 4, 4, "Recursos Humanos"),
-            ("Software", "Software", "Alta", "Fechado", 15, 11, 3, "Financeiro"),
-            ("Hardware", "Hardware", "Media", "Resolvido", 20, 8, None, "Operações"),
-            ("Rede", "Redes", "Critica", "Em Andamento", 1, None, None, "Comercial"),
-            ("Acesso", "Suporte", "Alta", "Em Espera", 2, None, None, "Recursos Humanos"),
-            ("Software", "Software", "Media", "Em Andamento", 0, None, None, "Financeiro"),
-            ("Acesso", "Suporte", "Baixa", "Fechado", 32, 28, 5, "Comercial"),
-            ("Hardware", "Hardware", "Alta", "Fechado", 26, 17, 4, "Operações"),
-            ("Rede", "Redes", "Media", "Fechado", 42, 37, 2, "Comercial"),
-            ("Acesso", "Suporte", "Media", "Fechado", 50, 43, 4, "Recursos Humanos"),
-            ("Software", "Software", "Baixa", "Cancelado", 18, None, None, "Financeiro"),
-        ]
-        inseridos = []
-        for indice, (categoria, equipe, urgencia, status, horas_atras, horas_resolucao, nota, departamento) in enumerate(padroes, start=1):
-            responsavel = joao if categoria == "Acesso" else pedro
-            criado_em = agora - timedelta(hours=horas_atras)
-            prazo_resposta = criado_em + timedelta(hours=2 if urgencia in {"Critica", "Alta"} else 8)
-            prazo_resolucao = criado_em + timedelta(hours=6 if urgencia == "Critica" else 24)
-            primeira_resposta = criado_em + timedelta(hours=1)
-            resolvido_em = (
-                criado_em + timedelta(hours=horas_resolucao)
-                if horas_resolucao is not None else None
-            )
-            concluido = status in {"Resolvido", "Fechado"}
-            diagnostico = f"Diagnóstico técnico simulado para ocorrência de {categoria.lower()}." if concluido else None
-            solucao = "Procedimento aplicado e serviço validado pelo atendimento." if concluido else None
-            titulo = f"[DEMO DASHBOARD] {categoria} — cenário {indice:02d}"
-            cursor.execute(
-                """INSERT INTO chamados
-                   (titulo, descricao, categoria, urgencia, confiabilidade, equipe_destino,
-                    categoria_ia, urgencia_ia, equipe_ia, metadados_ia, sla_resposta,
-                    sla_resolucao, status, criado_em, prazo_resposta, prazo_resolucao,
-                    primeira_resposta_em, resolvido_em, tempo_pausado_min, usuario_id, analista_id,
-                    categoria_final, urgencia_final, equipe_final, diagnostico_final, solucao_final)
-                   VALUES (%s, %s, %s, %s, 'Alta', %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (
-                    titulo, "Registro sintético criado exclusivamente para demonstrar indicadores do dashboard.",
-                    categoria, urgencia, equipe, categoria, urgencia, equipe,
-                    json.dumps({"origem": MARCADOR_DADOS_DEMONSTRACAO_DASHBOARD, "sintetico": True, "departamento_demo": departamento}),
-                    "2 horas", "24 horas", status, criado_em, prazo_resposta, prazo_resolucao,
-                    primeira_resposta, resolvido_em, 120 if status == "Em Espera" else 0,
-                    ana["id"], responsavel["id"],
-                    categoria if concluido else None, urgencia if concluido else None,
-                    equipe if concluido else None, diagnostico, solucao,
-                ),
-            )
+        existentes = cursor.fetchone()["total"]
+        cursor.execute(
+            """SELECT usuario_id, COUNT(*) AS total FROM chamados
+               WHERE status IN ('Novo', 'Em Andamento', 'Em Espera', 'Resolvido')
+               GROUP BY usuario_id"""
+        )
+        ativos = {linha["usuario_id"]: linha["total"] for linha in cursor.fetchall()}
+        cenarios = gerar_cenarios_demonstracao(
+            solicitantes, analistas, quantidade, agora_utc(), configuracao,
+            para_horario_local_sem_fuso, para_utc, MARCADOR_DADOS_DEMONSTRACAO_DASHBOARD,
+            inicio_indice=0 if substituir else existentes,
+            ativos_por_usuario=ativos,
+        )
+        if substituir:
+            _remover_cenarios_demonstracao(cursor)
+        for cenario in cenarios:
+            registro = cenario["chamado"]
+            # As colunas são definidas pelo gerador interno; valores sempre parametrizados.
+            colunas = ", ".join(registro)
+            parametros = ", ".join(["%s"] * len(registro))
+            cursor.execute(f"INSERT INTO chamados ({colunas}) VALUES ({parametros})", tuple(registro.values()))
             chamado_id = cursor.lastrowid
-            cursor.execute(
-                """INSERT INTO historico_chamados (chamado_id, autor_id, tipo, detalhes, criado_em)
-                   VALUES (%s, %s, 'ABERTURA', %s, %s), (%s, %s, 'ATRIBUICAO', %s, %s)""",
-                (
-                    chamado_id, ana["id"], json.dumps({"categoria": categoria, "urgencia": urgencia}, ensure_ascii=False), criado_em,
-                    chamado_id, responsavel["id"], json.dumps({"analista_id": responsavel["id"]}, ensure_ascii=False), criado_em + timedelta(minutes=10),
-                ),
-            )
-            cursor.execute(
-                """INSERT INTO mensagens_chamado (chamado_id, autor_id, autor_nome, autor_papel, mensagem, criado_em)
-                   VALUES (%s, %s, %s, 'usuario', %s, %s)""",
-                (chamado_id, ana["id"], ana["nome"], f"Olá, preciso de apoio com: {titulo}. O impacto foi informado no chamado.", criado_em),
-            )
-            cursor.execute(
-                """INSERT INTO mensagens_chamado (chamado_id, autor_id, autor_nome, autor_papel, mensagem, criado_em)
-                   VALUES (%s, %s, %s, 'analista', %s, %s)""",
-                (chamado_id, responsavel["id"], responsavel["nome"],
-                 "Recebi a solicitação e iniciei a análise. Retornarei com a próxima atualização pelo chamado.",
-                 criado_em + timedelta(hours=1)),
-            )
-            if status == "Em Espera":
+            for autor, papel, mensagem, criado_em in cenario["mensagens"]:
                 cursor.execute(
-                    """INSERT INTO mensagens_chamado (chamado_id, autor_id, autor_nome, autor_papel, mensagem, criado_em)
-                       VALUES (%s, %s, %s, 'analista', %s, %s)""",
-                    (chamado_id, responsavel["id"], responsavel["nome"],
-                     "Preciso da confirmação do solicitante para prosseguir. O atendimento permanecerá em espera.",
-                     criado_em + timedelta(hours=2)),
+                    """INSERT INTO mensagens_chamado
+                       (chamado_id, autor_id, autor_nome, autor_papel, mensagem, criado_em)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                    (chamado_id, autor["id"], autor["nome_completo"], papel, mensagem, criado_em),
                 )
-            elif status in {"Resolvido", "Fechado"}:
+            for autor_evento, tipo, detalhes, criado_em in cenario["eventos"]:
                 cursor.execute(
-                    """INSERT INTO mensagens_chamado (chamado_id, autor_id, autor_nome, autor_papel, mensagem, criado_em)
-                       VALUES (%s, %s, %s, 'analista', %s, %s)""",
-                    (chamado_id, responsavel["id"], responsavel["nome"],
-                     "A solução foi aplicada e o serviço foi validado. Permanecemos à disposição.",
-                     resolvido_em or criado_em + timedelta(hours=2)),
+                    """INSERT INTO historico_chamados (chamado_id, autor_id, tipo, detalhes, criado_em)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (chamado_id, autor_evento, tipo, json.dumps(detalhes, ensure_ascii=False), criado_em),
                 )
-            inseridos.append((chamado_id, nota))
-        for chamado_id, nota in inseridos:
-            if nota is not None:
+            if cenario["nota"] is not None:
                 cursor.execute(
-                    "INSERT INTO pesquisas_satisfacao (chamado_id, nota, comentario, respondido_em) VALUES (%s, %s, %s, %s)",
-                    (chamado_id, nota, "Avaliação sintética para demonstração do dashboard.", agora),
+                    """INSERT INTO pesquisas_satisfacao (chamado_id, nota, comentario, respondido_em)
+                       VALUES (%s, %s, %s, %s)""",
+                    (chamado_id, cenario["nota"], "[Demonstração] Avaliação sintética do atendimento.",
+                     registro["resolvido_em"] + timedelta(minutes=3)),
                 )
         _registrar_auditoria(
             cursor, autor_id, "DADOS_DEMONSTRACAO_DASHBOARD_INSERIDOS", "dashboard",
-            detalhes={"chamados": len(inseridos)},
+            detalhes={"chamados": len(cenarios), "substituicao": substituir},
         )
         conn.commit()
-        return len(inseridos)
+        return len(cenarios)
     except Exception:
         conn.rollback()
         raise
@@ -1552,19 +1532,18 @@ def inserir_dados_demonstracao_dashboard(autor_id):
         conn.close()
 
 
+def inserir_dados_demonstracao_dashboard(autor_id, quantidade=120):
+    """Acrescenta um lote sintético usando os solicitantes e analistas cadastrados."""
+    return _gravar_dados_demonstracao_dashboard(autor_id, quantidade)
+
+
 def remover_dados_demonstracao_dashboard(autor_id):
     """Remove somente registros cujo marcador identifica a massa sintética do dashboard."""
-    exigir_permissao(autor_id, "relatorios.visualizar")
-    if not usuario_eh_administrador(autor_id):
-        raise PermissionError("Somente administradores podem remover dados provisórios.")
+    _exigir_administrador_demonstracao(autor_id)
     conn = conectar()
     cursor = conn.cursor()
     try:
-        cursor.execute(
-            "DELETE FROM chamados WHERE JSON_UNQUOTE(JSON_EXTRACT(metadados_ia, '$.origem')) = %s",
-            (MARCADOR_DADOS_DEMONSTRACAO_DASHBOARD,),
-        )
-        removidos = cursor.rowcount
+        removidos = _remover_cenarios_demonstracao(cursor)
         _registrar_auditoria(
             cursor, autor_id, "DADOS_DEMONSTRACAO_DASHBOARD_REMOVIDOS", "dashboard",
             detalhes={"chamados": removidos},
@@ -1579,10 +1558,9 @@ def remover_dados_demonstracao_dashboard(autor_id):
         conn.close()
 
 
-def recriar_dados_demonstracao_dashboard(autor_id):
+def recriar_dados_demonstracao_dashboard(autor_id, quantidade=120):
     """Substitui apenas a massa sintética pela versão completa para apresentação."""
-    remover_dados_demonstracao_dashboard(autor_id)
-    return inserir_dados_demonstracao_dashboard(autor_id)
+    return _gravar_dados_demonstracao_dashboard(autor_id, quantidade, substituir=True)
 
 
 def atualizar_departamentos_dados_demonstracao_dashboard(autor_id):
@@ -1594,18 +1572,14 @@ def atualizar_departamentos_dados_demonstracao_dashboard(autor_id):
     cursor = conn.cursor()
     try:
         cursor.execute(
-            """UPDATE chamados
-               SET metadados_ia = JSON_SET(
-                   COALESCE(metadados_ia, JSON_OBJECT()), '$.departamento_demo',
-                   CASE categoria
-                       WHEN 'Acesso' THEN 'Recursos Humanos'
-                       WHEN 'Software' THEN 'Financeiro'
-                       WHEN 'Hardware' THEN 'Operações'
-                       WHEN 'Rede' THEN 'Comercial'
-                       ELSE 'Administrativo'
-                   END
-               )
-               WHERE JSON_UNQUOTE(JSON_EXTRACT(metadados_ia, '$.origem')) = %s""",
+            """UPDATE chamados c
+               LEFT JOIN usuarios u ON u.id = c.usuario_id
+               LEFT JOIN departamentos d ON d.id = u.departamento_id
+               SET c.metadados_ia = JSON_SET(
+                   COALESCE(c.metadados_ia, JSON_OBJECT()), '$.departamento_demo',
+                   COALESCE(d.nome, u.departamento, 'Não informado'))
+               WHERE JSON_UNQUOTE(JSON_EXTRACT(c.metadados_ia, '$.origem')) = %s
+                 AND JSON_EXTRACT(c.metadados_ia, '$.sintetico') = TRUE""",
             (MARCADOR_DADOS_DEMONSTRACAO_DASHBOARD,),
         )
         atualizados = cursor.rowcount
@@ -1623,12 +1597,14 @@ def atualizar_departamentos_dados_demonstracao_dashboard(autor_id):
         conn.close()
 
 
-def listar_chamados(limite=20, usuario_id=None, executor_id=None, para_relatorio=False, pagina=0):
+def listar_chamados(limite=20, usuario_id=None, executor_id=None, para_relatorio=False, pagina=0, status=None):
     # A fila é limitada para manter a tela responsiva. Relatórios precisam de
     # uma amostra maior para que totais e gráficos não sejam truncados.
     limite_maximo = 5000 if para_relatorio else 200
     limite = max(1, min(int(limite), limite_maximo))
     pagina = max(0, int(pagina))
+    if status is not None and status not in TRANSICOES_STATUS:
+        raise ValueError("Situação de chamado inválida.")
     if usuario_id is not None:
         if executor_id != usuario_id and not usuario_eh_administrador(executor_id):
             raise PermissionError("Você não tem permissão para consultar chamados de outro usuário.")
@@ -1646,15 +1622,17 @@ def listar_chamados(limite=20, usuario_id=None, executor_id=None, para_relatorio
         LEFT JOIN usuarios u ON c.usuario_id = u.id
         LEFT JOIN usuarios a ON c.analista_id = a.id
     """
+    condicoes, parametros = [], []
     if usuario_id is not None:
-        cursor.execute(
-            base_query + " WHERE c.usuario_id = %s ORDER BY c.criado_em DESC LIMIT %s OFFSET %s",
-            (usuario_id, limite, pagina * limite),
-        )
-    else:
-        cursor.execute(
-            base_query + " ORDER BY c.criado_em DESC LIMIT %s OFFSET %s", (limite, pagina * limite)
-        )
+        condicoes.append("c.usuario_id = %s")
+        parametros.append(usuario_id)
+    if status is not None:
+        condicoes.append("c.status = %s")
+        parametros.append(status)
+    if condicoes:
+        base_query += " WHERE " + " AND ".join(condicoes)
+    cursor.execute(base_query + " ORDER BY c.criado_em DESC, c.id DESC LIMIT %s OFFSET %s",
+                   tuple(parametros + [limite, pagina * limite]))
     resultados = cursor.fetchall()
     cursor.close()
     conn.close()

@@ -6,7 +6,7 @@ Trabalho realizado conforme o `C:/Users/tsaba/Desktop/AGENTS.md`, preservando as
 entradas Streamlit e as operações existentes de autenticação, autorização, IA,
 persistência e SLA. As alterações locais que já existiam em `database.py`,
 `sla.py` e `pages/_telas.py` foram consideradas como ponto de partida.
-Nenhuma migração, criação de chamados ou inserção de demonstrações foi executada.
+Na refatoração inicial, nenhuma migração, criação de chamados ou inserção de demonstrações foi executada.
 Na ampliação solicitada pelo usuário, foi excluído somente o departamento incorreto
 `Recursos Humanos (RH)` (ID 1), após confirmar a ausência de vínculos por ID ou nome e
 de referências adicionais no banco. A operação foi auditada e a consulta posterior
@@ -44,9 +44,10 @@ confirmou zero registros com esse nome.
 O arquivo de telas permanece como coordenador: não houve uma reescrita integral.
 `executar_aplicacao()` continua disponível para `app.py` e as três páginas.
 O inventário anterior de acessos e chaves de sessão está em [SESSAO_UI.md](SESSAO_UI.md).
-As chaves existentes foram preservadas. As novas são `dashboard_periodo`,
-`dashboard_departamento` e `dashboard_equipe`; são entradas de filtros e são
-descartadas, junto com todo o estado, ao sair.
+As chaves de autenticação, navegação e conversa foram preservadas. Os filtros
+atuais do dashboard usam `dashboard_periodo_abertura`, `dashboard_intervalo_datas`,
+`dashboard_categoria`, `dashboard_urgencia` e `dashboard_situacao`, conforme o
+inventário de sessão. São descartados, junto com todo o estado, ao sair.
 
 Foi avaliada a navegação com `st.Page`/`st.navigation`. Nesta alteração foram mantidos
 `st.page_link`/`st.switch_page` para preservar rotas e não misturar os dois modelos.
@@ -63,6 +64,11 @@ A seleção inicial foi extraída e testada independentemente dessa decisão.
 - Fila: quatro indicadores explicados, busca inclusive por número, seleção múltipla
   de estados e filtros secundários recolhidos. A busca e a seleção permanecem ao
   abrir detalhes; a ordenação existente por SLA, urgência e abertura foi mantida.
+- Histórico de fechados: cards compactos com número, título, solicitante, responsável,
+  categoria, urgência e datas. Descrição, conversa e SLA permanecem no detalhe.
+  O rodapé navega de cinco em cinco registros, com Anterior, Próxima e número da página.
+  A consulta percorre todas as páginas de fechados no banco, ordenadas por abertura
+  e número, e a busca alcança os chamados antigos. Indicadores ficam em um expansor.
 - Chamados: estado e urgência com texto e ícone; resposta e resolução com prazos
   efetivos fornecidos por `sla.py`, incluindo seus ajustes de pausa.
 - Ações: assumir, cancelar, responder, anexar, confirmar, resolver e transferir
@@ -70,19 +76,52 @@ A seleção inicial foi extraída e testada independentemente dessa decisão.
 - Dashboard: ativos, violações, risco e cumprimento do SLA; tendência diária,
   carga por departamento, urgências, situação por etapa e tabela de exceções.
   Chamados cancelados não entram nos alertas nem no cumprimento.
+- Carga por departamento considera todo o recorte em barras empilhadas de ativos,
+  fechados e cancelados. O histórico participa do volume total de cada setor;
+  os KPIs e as exceções continuam usando os ativos conforme as regras existentes.
+- Os gráficos de volume de chamados compartilham `ui/charts.py`: três séries fixas,
+  na ordem Ativos, Cancelados e Fechados, em barras empilhadas. A mesma classificação
+  vale para datas de abertura, urgências, equipes, departamentos, categorias,
+  analistas, confiança da IA e análises de priorização. Recortes específicos mantêm
+  sua seleção de registros. A evolução mostra a situação atual dos chamados de
+  cada dia de abertura, preenchendo com zero os dias intermediários sem chamados.
 - Cumprimento exige ambos os marcos e prazos: resposta e resolução cumpridas
   divididas pela amostra com essas informações. Sem amostra, o indicador informa
   isso em vez de apresentar uma porcentagem artificial.
-- Datas incompletas pedem que a seleção seja concluída. Filtros de departamento
-  e equipe têm um resumo visível. Cadastros e métricas globais de IA são identificados
+- O período de abertura oferece janelas móveis de 30 dias, 7 dias e 24 horas,
+  além de um intervalo de dias completos e todo o histórico até agora, no horário de São Paulo.
+  As páginas de chamados são carregadas até o fim, sem truncar em 5.000 registros. Categoria,
+  urgência e situação ficam visíveis, com resumo da seleção e botão para limpar.
+  O antigo expansor de departamento e equipe foi removido. Cadastros e métricas globais de IA são identificados
   como escopos distintos do recorte de chamados.
 - As análises complementares existentes e os controles de demonstração foram mantidos
   fora da leitura principal. Os controles de demonstração só aparecem a administradores.
+- A demonstração agora usa os solicitantes e analistas com permissões efetivas e os
+  departamentos atuais. O painel permite adicionar lotes de 12 a 500 chamados e remover
+  somente os marcados como sintéticos. Os cadastros não são alterados. Os dados incluem
+  conversas, histórico, avaliações e prazos calculados por `sla.py`; o volume de ativos
+  deixa uma vaga por solicitante para um chamado real. A geração está em `demo_data.py`.
 - CSS inativo e HTML dependente dele foram removidos. Gráficos simples usam os
   componentes nativos; as hipóteses de causa são apresentadas em blocos legíveis.
   A configuração continua permitindo os temas nativos Light e Dark.
 
 ## Validação
+
+Na padronização dos gráficos, os 106 testes passaram, incluindo a renderização
+dos relatórios com as três séries, os totais sem duplicação e a evolução com dias
+sem abertura. A validação desta revisão usou o AppTest do Streamlit; não houve
+nova conferência visual no navegador.
+
+Na revisão das demonstrações, os 99 testes passaram. Foram adicionados 120 chamados
+no MySQL local, totalizando 132 demonstrações. Impressões SHA-256 confirmaram que os
+27 registros anteriores, cinco usuários e três departamentos foram preservados. A
+remoção dos 132 exemplos foi executada em uma transação revertida ao final: os 15
+chamados reais permaneceram e as demonstrações continuaram disponíveis após o teste.
+
+Na revisão do histórico de fechados, os 85 testes da suíte passaram. A prévia
+local com dados fictícios foi conferida no navegador em 1280 × 720 e 390 × 844,
+incluindo os cards, a segunda página e o rodapé. O tema escuro e os dados reais
+não foram verificados visualmente nesta revisão.
 
 Ambiente encontrado: Python 3.11 e Streamlit 1.61.1. `requirements.txt` declara a
 versão mínima de Streamlit utilizada na validação; não foram adicionadas bibliotecas.

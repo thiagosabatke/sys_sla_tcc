@@ -4,7 +4,6 @@ import streamlit as st
 import pandas as pd
 import mysql.connector
 from datetime import datetime, time, timedelta
-from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from ia_engine import (
@@ -35,7 +34,7 @@ from database import (
     cancelar_chamado_sem_atribuicao, confirmar_resolucao_usuario, reabrir_chamado_usuario,
     obter_configuracao_sla, atualizar_configuracao_sla, fechar_chamados_resolvidos_automaticamente,
     listar_auditoria, inserir_dados_demonstracao_dashboard, remover_dados_demonstracao_dashboard,
-    recriar_dados_demonstracao_dashboard, atualizar_departamentos_dados_demonstracao_dashboard, para_horario_local,
+    contar_dados_demonstracao_dashboard, para_horario_local,
 )
 from auth import (
     autenticar, gerar_hash_senha, gerar_codigo_numerico, gerar_totp_secret,
@@ -54,8 +53,16 @@ from ui.components import (
     indicadores_destaque_chamado,
     exibir_status_chamado,
 )
-from ui.admin_dashboard import renderizar_dashboard, duracao_resolucao_horas, departamento_relatorio as _departamento_relatorio
-from ui.analyst_view import filtros_fila, filtrar_fila, resumo_filtros, cartao_fila_compacto
+from ui.admin_dashboard import renderizar_dashboard, duracao_resolucao_horas, departamento_relatorio as _departamento_relatorio, filtros_dashboard
+from ui.charts import (
+    SITUACOES_CHAMADOS, resumir_por_situacao, resumir_evolucao_por_situacao,
+    exibir_grafico_situacao,
+)
+from ui.analyst_view import (
+    filtros_fila, filtrar_fila, resumo_filtros, cartao_fila_compacto,
+    cartao_historico_compacto, paginar_historico, reiniciar_consulta_historico,
+    fechar_detalhe_historico,
+)
 from ui.requester_view import boas_vindas, contexto_conversa, acompanhar_chamado
 
 
@@ -875,8 +882,6 @@ def tela_analista(usuario):
     injetar_css()
     cabecalho("Central de Serviços — Analista", f"{usuario['nome']} · Gestão de Incidentes")
 
-    chamados = listar_chamados(limite=200, executor_id=usuario["id"])
-
     opcoes_navegacao = ["Fila ativa", "Histórico (fechados)", "Cancelados"]
     if st.session_state.get("analista_nav") not in opcoes_navegacao:
         st.session_state.analista_nav = opcoes_navegacao[0]
@@ -885,6 +890,19 @@ def tela_analista(usuario):
         navegacao = st.radio(
             "Seções de atendimento", opcoes_navegacao, key="analista_nav", label_visibility="collapsed",
         )
+
+    if navegacao == "Histórico (fechados)":
+        chamados = []
+        pagina_consulta = 0
+        while True:
+            lote = listar_chamados(limite=200, executor_id=usuario["id"],
+                                   pagina=pagina_consulta, status="Fechado")
+            chamados.extend(lote)
+            if len(lote) < 200:
+                break
+            pagina_consulta += 1
+    else:
+        chamados = listar_chamados(limite=200, executor_id=usuario["id"])
 
     if navegacao == "Fila ativa":
         _aba_fila_ativa_analista(usuario, chamados)
@@ -1128,6 +1146,9 @@ def _aba_fila_ativa_analista(usuario, chamados_todos):
 
 def _aba_historico_analista(usuario, chamados_todos):
     chamados = [c for c in chamados_todos if c["status"] == "Fechado"]
+    chamados.sort(key=lambda c: (c.get("criado_em") or datetime.min, c["id"]), reverse=True)
+    st.subheader("Histórico de chamados fechados")
+    st.caption("Consulte por número, título ou solicitante. Os chamados aparecem do mais recente ao mais antigo pela abertura.")
 
     if not chamados:
         st.info("Nenhum chamado fechado ainda.")
@@ -1141,23 +1162,23 @@ def _aba_historico_analista(usuario, chamados_todos):
     )
     taxa_cumprimento = f"{(dentro_prazo / total_fechados * 100):.0f}%" if total_fechados else "—"
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total fechados", total_fechados)
-    m2.metric("SLA cumprido", dentro_prazo)
-    m3.metric("Taxa de cumprimento", taxa_cumprimento)
+    with st.expander("Indicadores do histórico"):
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total fechados", total_fechados)
+        m2.metric("SLA cumprido", dentro_prazo)
+        m3.metric("Taxa de cumprimento", taxa_cumprimento)
+        st.caption("Indicadores do histórico completo, antes dos filtros. A taxa considera somente chamados fechados. "
+                   "Cancelados ficam em uma lista separada e não compõem este indicador.")
 
-    st.caption(
-        "A taxa de cumprimento considera somente chamados fechados. "
-        "Chamados cancelados ficam em uma lista separada e não compõem este indicador."
-    )
-
-    st.divider()
-
-    filtro_col1, filtro_col2 = st.columns([1.2, 1])
-    with filtro_col1:
-        filtro_urgencia_hist = st.multiselect("Urgência", options=["Critica", "Alta", "Media", "Baixa"], default=[], key="filtro_urgencia_hist")
-    with filtro_col2:
-        somente_meus_hist = st.checkbox("Somente atendidos por mim", key="somente_meus_hist")
+    with st.container(border=True):
+        busca = st.text_input("Buscar chamado", placeholder="Número, título ou solicitante", key="busca_historico",
+                              on_change=reiniciar_consulta_historico).strip().casefold().lstrip("#")
+        filtro_col1, filtro_col2 = st.columns([1.2, 1], vertical_alignment="bottom")
+        filtro_urgencia_hist = filtro_col1.multiselect(
+            "Urgência", options=["Critica", "Alta", "Media", "Baixa"], format_func=rotulo,
+            key="filtro_urgencia_hist", on_change=reiniciar_consulta_historico)
+        somente_meus_hist = filtro_col2.checkbox("Somente atendidos por mim", key="somente_meus_hist",
+                                                on_change=reiniciar_consulta_historico)
 
     chamados_filtrados = chamados
     if filtro_urgencia_hist:
@@ -1165,31 +1186,33 @@ def _aba_historico_analista(usuario, chamados_todos):
     if somente_meus_hist:
         chamados_filtrados = [c for c in chamados_filtrados if c.get("analista_id") == usuario["id"]]
 
-    busca = st.text_input("Buscar chamado", placeholder="Número, título ou solicitante", key="busca_historico").strip().casefold().lstrip("#")
     if busca:
         chamados_filtrados = [c for c in chamados_filtrados if busca in f"{c['id']} {c['titulo']} {c.get('nome_usuario') or ''}".casefold()]
 
-    lista_col = st.expander("Chamados fechados", expanded=st.session_state.get("chamado_selecionado_historico") is None)
-    detalhe_col = st.container()
+    st.caption(f"{len(chamados_filtrados)} chamado(s) encontrado(s) de {total_fechados} fechados")
+    lista_col = st.container()
+    # Reserva a lista antes de montar o rodapé, que decide qual página renderizar.
+    registros_pagina = paginar_historico(chamados_filtrados)
 
     with lista_col:
-        st.markdown("##### Registros encerrados")
         if not chamados_filtrados:
-            st.caption("Nenhum chamado fechado com os filtros selecionados.")
-        for c in paginar_registros(chamados_filtrados, "pagina_historico"):
-            estado_sla = sla.status_sla(c)
+            st.info("Nenhum chamado fechado com os filtros selecionados. Ajuste a busca ou a urgência.")
+        for c in registros_pagina:
             selecionado = st.session_state.get("chamado_selecionado_historico") == c["id"]
-            contexto = f"Solicitante: {c.get('nome_usuario') or '—'} · Responsável: {c.get('nome_analista') or '—'}"
-            if exibir_cartao_chamado(c, estado_sla, contexto, selecionado, f"hist_{c['id']}"):
+            if cartao_historico_compacto(c, selecionado):
                 st.session_state.chamado_selecionado_historico = c["id"]
                 st.rerun()
 
-    with detalhe_col:
+    with st.container():
         chamado_id_sel = st.session_state.get("chamado_selecionado_historico")
         if chamado_id_sel is None:
-            st.info("Selecione um chamado fechado para ver o registro completo.")
+            return
+        if chamado_id_sel not in {c["id"] for c in registros_pagina}:
+            st.session_state.chamado_selecionado_historico = None
             return
 
+        st.divider()
+        st.button("Fechar detalhes", key="historico_fechar_detalhes", on_click=fechar_detalhe_historico)
         chamado = buscar_chamado_por_id(chamado_id_sel, usuario["id"])
         if not chamado or chamado["status"] != "Fechado":
             st.warning("Chamado não encontrado no histórico.")
@@ -1438,16 +1461,11 @@ def relatorio_ia(chamados, admin):
     c3.metric("Confiança média", int(distribuicao["Média"]))
     c4.metric("Confiança baixa", int(distribuicao["Baixa"]))
 
-    resultados = pd.DataFrame({
-        "Confiança da classificação": niveis,
-        "Quantidade": distribuicao.values,
-    })
-    _exibir_grafico_barras(
-        resultados,
-        "Distribuição da confiança da classificação",
-        "Confiança da classificação",
-        "Quantidade",
-    )
+    dados["Confiança da classificação"] = confianca
+    resultados = resumir_por_situacao(dados.to_dict("records"), "Confiança da classificação",
+                                       lambda c: c["Confiança da classificação"], grupos=niveis)
+    exibir_grafico_situacao(resultados, "Confiança da classificação", "Distribuição da confiança da classificação")
+    st.caption("Chamados do recorte por confiança registrada, separados em ativos, cancelados e fechados.")
 
 
 def relatorio_aprendizado_por_casos(admin):
@@ -1496,6 +1514,8 @@ def relatorio_produtividade_equipe(chamados):
     dados["tempo_resolucao_horas"] = [duracao_resolucao_horas(c) for c in dados.to_dict("records")]
     produtividade = dados.groupby("Analista", as_index=False).agg(
         Atribuídos=("id", "count"),
+        Ativos=("status", lambda status: int((~status.isin(STATUS_ENCERRADOS)).sum())),
+        Cancelados=("status", lambda status: int((status == "Cancelado").sum())),
         Fechados=("status", lambda status: int((status == "Fechado").sum())),
         Resolvidos=("resolvido_em", lambda data: int(data.notna().sum())),
         **{"Tempo médio de resolução (h de atendimento)": ("tempo_resolucao_horas", "mean")},
@@ -1505,7 +1525,8 @@ def relatorio_produtividade_equipe(chamados):
     c1.metric("Analistas com demanda", len(produtividade))
     c2.metric("Chamados atribuídos", len(dados))
     c3.metric("Chamados fechados", int((dados["status"] == "Fechado").sum()))
-    _exibir_grafico_barras(produtividade, "Chamados fechados por analista", "Analista", "Fechados")
+    exibir_grafico_situacao(produtividade, "Analista", "Chamados por analista")
+    st.caption("Chamados atribuídos no recorte, separados em ativos, cancelados e fechados. Chamados sem atribuição não entram nesta comparação.")
     tabela = produtividade.copy()
     tabela["Tempo médio de resolução (h de atendimento)"] = tabela["Tempo médio de resolução (h de atendimento)"].map(lambda valor: f"{valor:.1f}" if pd.notna(valor) else "—")
     exibir_tabela_tematica(tabela)
@@ -1540,7 +1561,9 @@ def relatorio_cancelamentos(chamados):
     motivos["Percentual"] = (motivos["Quantidade"] / total_cancelados * 100).map(lambda valor: f"{valor:.1f}%")
     grafico, tabela = st.columns([1.4, 1])
     with grafico:
-        _exibir_grafico_barras(motivos, "Cancelamentos por motivo", "Motivo", "Quantidade")
+        distribuicao = resumir_por_situacao(cancelados.to_dict("records"), "Motivo", lambda c: c["Motivo"])
+        exibir_grafico_situacao(distribuicao, "Motivo", "Cancelamentos por motivo")
+        st.caption("Este recorte considera somente cancelamentos; as séries Ativos e Fechados ficam zeradas.")
     with tabela:
         exibir_tabela_tematica(motivos)
 
@@ -1842,17 +1865,15 @@ def relatorio_operacional(chamados, admin):
     ]
     if pesquisas:
         st.caption(f"Satisfação média: {sum(item['nota'] for item in pesquisas) / len(pesquisas):.1f}/5 em {len(pesquisas)} avaliação(ões).")
-    carga = ativos.groupby(ativos["equipe_destino"].fillna("Sem equipe")).size().reset_index(name="Backlog")
-    carga.columns = ["Equipe", "Backlog"]
-    tendencia = dados.copy()
-    tendencia["criado_em"] = pd.to_datetime(tendencia["criado_em"])
-    tendencia = tendencia.groupby(tendencia["criado_em"].dt.date).size().reset_index(name="Chamados abertos")
-    tendencia.columns = ["Data", "Chamados abertos"]
+    carga = resumir_por_situacao(chamados, "Equipe", lambda c: c.get("equipe_destino") or "Sem equipe")
+    tendencia = resumir_evolucao_por_situacao(chamados)
     carga_coluna, tendencia_coluna = st.columns(2)
     with carga_coluna:
-        _exibir_grafico_barras(carga, "Carga atual por equipe", "Equipe", "Backlog")
+        exibir_grafico_situacao(carga, "Equipe", "Chamados por equipe")
+        st.caption("Todos os chamados do recorte por equipe, separados em ativos, cancelados e fechados.")
     with tendencia_coluna:
-        _exibir_grafico_barras(tendencia, "Tendência de abertura no período", "Data", "Chamados abertos")
+        exibir_grafico_situacao(tendencia, "Data", "Tendência de abertura no período", horizontal=False)
+        st.caption("Situação atual dos chamados por data de abertura no recorte: ativos, cancelados e fechados.")
     exportacao = dados[["id", "status", "categoria", "urgencia", "equipe_destino", "criado_em", "resolvido_em"]].copy()
     st.download_button("Exportar indicadores operacionais (CSV)", exportacao.to_csv(index=False).encode("utf-8-sig"), "indicadores_operacionais.csv", "text/csv")
 
@@ -2013,7 +2034,9 @@ def _relatorio_executivo_complementar(chamados, admin):
             pareto = base_pareto[dimensao].value_counts().rename_axis(dimensao).reset_index(name="Chamados")
             pareto["% acumulado"] = pareto["Chamados"].cumsum() / pareto["Chamados"].sum() * 100
         if not pareto.empty:
-            _exibir_grafico_barras(pareto, titulo_pareto, dimensao, "Chamados")
+            distribuicao = resumir_por_situacao(base_pareto.to_dict("records"), dimensao, lambda c: c[dimensao])
+            exibir_grafico_situacao(distribuicao, dimensao, titulo_pareto)
+            st.caption("Ativos, cancelados e fechados dentro do recorte escolhido para a priorização.")
             st.caption("A participação acumulada é apresentada na tabela ao lado; 80% é uma referência, não uma causa comprovada.")
 
 
@@ -2077,68 +2100,28 @@ def _relatorio_executivo_complementar(chamados, admin):
 
 
 def relatorio_chamados_abertos_por_departamento(chamados):
-    """Exibe o backlog por departamento do solicitante, incluindo departamentos sem demanda."""
-    st.markdown("### Chamados abertos por departamento")
-    st.caption(
-        "Considera os chamados que ainda não foram fechados ou cancelados, conforme o "
-        "departamento do solicitante."
-    )
-
-    dados = pd.DataFrame(chamados)
-    departamentos = listar_departamentos()
-    nomes_departamentos = [departamento["nome"] for departamento in departamentos]
-
-    if dados.empty:
-        abertos_por_departamento = pd.DataFrame({
-            "Departamento": nomes_departamentos,
-            "Chamados abertos": [0] * len(nomes_departamentos),
-        })
-    else:
-        abertos = dados[~dados["status"].isin(STATUS_ENCERRADOS)].copy()
-        abertos["Departamento"] = abertos.apply(_departamento_relatorio, axis=1)
-        contagem = abertos.groupby("Departamento").size()
-        ordem = list(dict.fromkeys(nomes_departamentos + contagem.index.tolist()))
-        abertos_por_departamento = pd.DataFrame({
-            "Departamento": ordem,
-            "Chamados abertos": [int(contagem.get(nome, 0)) for nome in ordem],
-        })
-
-    total_abertos = int(abertos_por_departamento["Chamados abertos"].sum())
-    sem_departamento = int(
-        abertos_por_departamento.loc[
-            abertos_por_departamento["Departamento"] == "Não informado", "Chamados abertos"
-        ].sum()
-    )
-    maior_demanda = abertos_por_departamento.sort_values(
-        "Chamados abertos", ascending=False
-    ).head(1)
-
+    """Compara o volume do recorte, incluindo departamentos sem chamados."""
+    st.markdown("### Chamados por departamento")
+    st.caption("Todos os chamados do recorte por departamento do solicitante, separados em ativos, cancelados e fechados.")
+    nomes = [d["nome"] for d in listar_departamentos()]
+    distribuicao = resumir_por_situacao(chamados, "Departamento", _departamento_relatorio, grupos=nomes)
+    distribuicao["Total"] = distribuicao[list(SITUACOES_CHAMADOS)].sum(axis=1)
+    total = int(distribuicao["Total"].sum())
+    sem_departamento = int(distribuicao.loc[distribuicao["Departamento"] == "Não informado", "Total"].sum())
     c1, c2, c3 = st.columns(3)
-    c1.metric("Chamados abertos", total_abertos)
-    c2.metric(
-        "Departamento com maior demanda",
-        maior_demanda.iloc[0]["Departamento"] if total_abertos else "—",
-        f"{int(maior_demanda.iloc[0]['Chamados abertos'])} chamado(s)" if total_abertos else None,
-    )
+    c1.metric("Chamados no período", total)
+    c2.metric("Departamento com maior demanda",
+              distribuicao.iloc[0]["Departamento"] if total else "—",
+              f"{int(distribuicao.iloc[0]['Total'])} chamado(s)" if total else None)
     c3.metric("Sem departamento informado", sem_departamento)
-
-    if abertos_por_departamento.empty:
+    if distribuicao.empty:
         st.info("Cadastre departamentos para acompanhar a distribuição dos chamados.")
         return
-
-    abertos_por_departamento = abertos_por_departamento.sort_values(
-        ["Chamados abertos", "Departamento"], ascending=[False, True]
-    ).reset_index(drop=True)
     grafico, tabela = st.columns([1.4, 1])
     with grafico:
-        _exibir_grafico_barras(
-            abertos_por_departamento,
-            "Backlog por departamento",
-            "Departamento",
-            "Chamados abertos",
-        )
+        exibir_grafico_situacao(distribuicao, "Departamento", "Volume por departamento")
     with tabela:
-        exibir_tabela_tematica(abertos_por_departamento)
+        exibir_tabela_tematica(distribuicao)
 
 
 def relatorio_demanda_por_departamento_categoria(chamados):
@@ -2162,13 +2145,8 @@ def relatorio_demanda_por_departamento_categoria(chamados):
         .str.strip()
         .replace("", "Não classificada")
     )
-    demanda_departamento = (
-        dados.groupby("Departamento", as_index=False)
-        .size()
-        .rename(columns={"size": "Chamados criados"})
-        .sort_values(["Chamados criados", "Departamento"], ascending=[False, True])
-        .reset_index(drop=True)
-    )
+    demanda_departamento = resumir_por_situacao(chamados, "Departamento", _departamento_relatorio)
+    demanda_departamento["Chamados criados"] = demanda_departamento[list(SITUACOES_CHAMADOS)].sum(axis=1)
     departamento_selecionado = st.selectbox(
         "Analisar categorias do departamento",
         demanda_departamento["Departamento"].tolist(),
@@ -2194,12 +2172,11 @@ def relatorio_demanda_por_departamento_categoria(chamados):
 
     grafico, tabela = st.columns([1.4, 1])
     with grafico:
-        _exibir_grafico_barras(
-            categorias,
-            f"Categorias recorrentes — {departamento_selecionado}",
-            "Categoria",
-            "Chamados criados",
-        )
+        distribuicao = resumir_por_situacao(
+            dados[dados["Departamento"] == departamento_selecionado].to_dict("records"),
+            "Categoria", lambda c: c["Categoria"])
+        exibir_grafico_situacao(distribuicao, "Categoria", f"Categorias recorrentes — {departamento_selecionado}")
+        st.caption("Chamados do departamento selecionado no recorte, separados em ativos, cancelados e fechados.")
     with tabela:
         exibir_tabela_tematica(demanda_departamento)
 
@@ -2525,6 +2502,38 @@ def painel_perfil_usuario_admin(admin):
                     st.error(str(erro))
 
 
+def painel_dados_demonstracao(usuario):
+    if not usuario_eh_administrador(usuario["id"]):
+        return
+    with st.expander("Chamados de demonstração", expanded=False):
+        st.caption(
+            "Gera exemplos usando os solicitantes, analistas e departamentos cadastrados, "
+            "com mensagens, histórico, avaliações e prazos de SLA. "
+            "Os chamados aparecem no portal, no atendimento e nos dashboards com a marca [DEMO DASHBOARD]."
+        )
+        st.caption("A quantidade de ativos respeita a capacidade dos solicitantes; os demais exemplos ficam no histórico.")
+        existentes = contar_dados_demonstracao_dashboard(usuario["id"])
+        st.caption(f"{existentes} chamado(s) de demonstração cadastrado(s).")
+        quantidade = st.number_input("Quantidade de chamados a adicionar", min_value=12, max_value=500,
+                                      value=120, step=12, key="demo_quantidade")
+        adicionar, remover = st.columns(2)
+        if adicionar.button("Adicionar chamados de demonstração", key="inserir_demo_dashboard", width="stretch"):
+            try:
+                with st.spinner("Criando chamados de demonstração..."):
+                    inseridos = inserir_dados_demonstracao_dashboard(usuario["id"], quantidade=int(quantidade))
+                recarregar_com_feedback(f"{inseridos} chamados de demonstração adicionados com os cadastros atuais.")
+            except (ValueError, PermissionError, mysql.connector.Error) as erro:
+                st.error(f"Não foi possível adicionar os chamados de demonstração: {erro}")
+        if remover.button("Remover chamados de demonstração", key="remover_demo_dashboard",
+                          disabled=existentes == 0, width="stretch",
+                          help="Remove os chamados marcados como demonstração e suas mensagens, histórico e avaliações."):
+            try:
+                removidos = remover_dados_demonstracao_dashboard(usuario["id"])
+                recarregar_com_feedback(f"{removidos} chamados de demonstração removidos. Os chamados reais foram preservados.")
+            except (ValueError, PermissionError, mysql.connector.Error) as erro:
+                st.error(f"Não foi possível remover os chamados de demonstração: {erro}")
+
+
 def tela_admin(usuario):
     injetar_css()
     cabecalho("Administração", "Gerencie pessoas, operação, indicadores e conformidade", "🛡️")
@@ -2574,30 +2583,17 @@ def tela_admin(usuario):
 
     if navegacao == "Dashboards":
         chamados = listar_chamados(limite=5000, executor_id=usuario["id"], para_relatorio=True)
-        hoje = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+        lote = chamados
+        pagina = 0
+        while len(lote) == 5000:
+            pagina += 1
+            lote = listar_chamados(limite=5000, executor_id=usuario["id"], para_relatorio=True, pagina=pagina)
+            chamados.extend(lote)
         st.subheader("Painel de indicadores")
         st.caption("Chamados filtrados pela data de abertura. Indicadores operacionais usam a situação atual desse recorte.")
-        if len(chamados) == 5000:
-            st.warning("A consulta atingiu o limite de 5.000 registros mais recentes. O recorte pode estar incompleto.")
-        periodo = st.date_input(
-            "Período de abertura", value=(hoje.replace(day=1), hoje), max_value=hoje,
-            key="dashboard_periodo",
-        )
-        if not isinstance(periodo, (tuple, list)) or len(periodo) != 2:
-            st.info("Selecione a data inicial e a data final para atualizar os indicadores.")
+        chamados = filtros_dashboard(chamados)
+        if chamados is None:
             return
-        inicio, fim = periodo
-        chamados = [c for c in chamados if c.get("criado_em") and inicio <= c["criado_em"].date() <= fim]
-        with st.expander("Filtros avançados do dashboard", expanded=False):
-            departamentos = ["Todos"] + sorted({_departamento_relatorio(c) for c in chamados})
-            departamento = st.selectbox("Departamento do solicitante", departamentos, key="dashboard_departamento")
-            equipes = ["Todas"] + sorted({c.get("equipe_destino") or "Sem equipe" for c in chamados})
-            equipe = st.selectbox("Equipe responsável", equipes, key="dashboard_equipe")
-        if departamento != "Todos":
-            chamados = [c for c in chamados if _departamento_relatorio(c) == departamento]
-        if equipe != "Todas":
-            chamados = [c for c in chamados if (c.get("equipe_destino") or "Sem equipe") == equipe]
-        st.caption(f"{inicio:%d/%m/%Y} a {fim:%d/%m/%Y} · Departamento: {departamento} · Equipe: {equipe} · {len(chamados)} chamado(s)")
         st.caption("O recorte de chamados vale para Executivo, Visão geral e Operação e SLA. Pessoas mostra o cadastro atual; IA e conhecimento informa seu próprio escopo.")
 
         painel = st.segmented_control("Painel", ["Executivo", "Visão geral", "Operação e SLA", "Pessoas", "IA e conhecimento"], default="Executivo", required=True, key="dashboard_painel")
@@ -2647,45 +2643,7 @@ def tela_admin(usuario):
             st.divider()
             relatorio_aprendizado_por_casos(usuario)
 
-        if usuario_eh_administrador(usuario["id"]):
-            with st.expander("Dados provisórios para demonstração", expanded=False):
-                st.caption(
-                    "Insere 12 chamados sintéticos identificados como **[DEMO DASHBOARD]**, com SLA, "
-                    "status, avaliações e mensagens simuladas. A massa usa Ana Oliveira como solicitante e Pedro/João como analistas, sem criar novas contas."
-                )
-                demo_coluna, recriar_coluna, atualizar_coluna, remover_coluna = st.columns(4)
-                with demo_coluna:
-                    if st.button("Inserir dados provisórios", key="inserir_demo_dashboard"):
-                        try:
-                            quantidade = inserir_dados_demonstracao_dashboard(usuario["id"])
-                            if quantidade:
-                                st.success(f"{quantidade} registros provisórios inseridos no dashboard.")
-                            else:
-                                st.info("Os dados provisórios já estão inseridos.")
-                            st.rerun()
-                        except (ValueError, PermissionError, mysql.connector.Error) as erro:
-                            st.error(f"Não foi possível inserir os dados provisórios: {erro}")
-                with recriar_coluna:
-                    if st.button("Recriar dados completos", key="recriar_demo_dashboard"):
-                        try:
-                            quantidade = recriar_dados_demonstracao_dashboard(usuario["id"])
-                            recarregar_com_feedback(f'{quantidade} registros provisórios recriados com usuários, analistas e mensagens.')
-                        except (ValueError, PermissionError, mysql.connector.Error) as erro:
-                            st.error(f"Não foi possível recriar os dados provisórios: {erro}")
-                with atualizar_coluna:
-                    if st.button("Corrigir departamentos", key="atualizar_demo_departamentos"):
-                        try:
-                            quantidade = atualizar_departamentos_dados_demonstracao_dashboard(usuario["id"])
-                            recarregar_com_feedback(f'{quantidade} registro(s) provisório(s) atualizado(s) com departamento.')
-                        except (ValueError, PermissionError, mysql.connector.Error) as erro:
-                            st.error(f"Não foi possível corrigir os departamentos: {erro}")
-                with remover_coluna:
-                    if st.button("Remover somente dados provisórios", key="remover_demo_dashboard"):
-                        try:
-                            quantidade = remover_dados_demonstracao_dashboard(usuario["id"])
-                            recarregar_com_feedback(f'{quantidade} registro(s) provisório(s) removido(s). Dados reais não foram alterados.')
-                        except (ValueError, PermissionError, mysql.connector.Error) as erro:
-                            st.error(f"Não foi possível remover os dados provisórios: {erro}")
+        painel_dados_demonstracao(usuario)
 
     if navegacao == "Auditoria":
         painel_auditoria_admin(usuario)

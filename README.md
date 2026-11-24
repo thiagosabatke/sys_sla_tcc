@@ -72,6 +72,40 @@ Após editar arquivos Python, reinicie o aplicativo pelo BAT. O observador autom
 de módulos está desativado para evitar que o Streamlit tente carregar dependências
 multimodais opcionais do `transformers`, que não são usadas neste sistema.
 
+Nos dashboards, o período de abertura oferece **Último mês** (30 dias), **Última
+semana** (7 dias), **Último dia** (24 horas), **Intervalo de datas** (da data inicial
+à final, incluindo os dois dias completos) e **Até agora** (todo o histórico até
+o momento atual), no horário de São Paulo. A consulta carrega todas as páginas de
+chamados, sem o corte anterior de 5.000 registros. Categoria, urgência e situação podem ser combinadas nos
+filtros visíveis; **Limpar filtros** restaura o último mês com todas as opções.
+O mesmo recorte alimenta Executivo, Visão geral e Operação e SLA. Pessoas considera
+o cadastro atual; IA e conhecimento identifica o escopo de suas próprias métricas.
+Em **Carga por departamento**, cada barra soma todos os chamados do recorte e
+separa ativos, fechados e cancelados. Assim, o histórico de atendimento participa
+do volume do setor, e a parcela ativa continua identificada.
+Os gráficos de chamados seguem a legenda **Ativos → Cancelados → Fechados**,
+com barras empilhadas por data de abertura, urgência, equipe, departamento,
+categoria, analista e confiança da classificação. Cada chamado entra uma vez.
+Os recortes específicos, como fila pendente e motivos de cancelamento, continuam
+respeitando seu escopo; as séries sem registros aparecem zeradas. Resolvidos
+aguardando confirmação permanecem em Ativos.
+
+No Atendimento, **Histórico (fechados)** apresenta cards compactos e busca por
+número, título ou solicitante. Use **Anterior**, **Próxima** ou o número da página
+no rodapé para consultar chamados mais antigos, cinco por vez. O histórico carrega
+todos os fechados autorizados; **Ver detalhes** abre o registro completo sem perder
+a página atual. Os indicadores de SLA continuam disponíveis em um expansor.
+
+Administradores podem usar **Administração → Dashboards → Chamados de demonstração**
+para adicionar lotes de 12 a 500 chamados (padrão: 120) ou remover as demonstrações.
+Os exemplos usam os usuários, permissões e departamentos atuais, sem alterar os
+cadastros, e incluem mensagens, histórico e avaliações. Há registros recentes e
+antigos, até 90 dias. A quantidade de ativos respeita o limite por solicitante e
+reserva uma vaga para uma solicitação real; os demais exemplos ficam no histórico.
+Novos lotes são acrescentados aos existentes. A remoção exige o marcador interno
+e a indicação de dado sintético, apaga os dados dependentes desses chamados e
+preserva os chamados reais e a auditoria.
+
 ## Fluxo implementado
 
 - Usuário: consulta a Central de ajuda e inicia a conversa com uma mensagem

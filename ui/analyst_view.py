@@ -1,5 +1,6 @@
-"""Busca e filtros da fila, sem alterar a ordenação operacional existente."""
+"""Busca, filtros e listas de atendimento, sem alterar as regras dos chamados."""
 
+from math import ceil
 import streamlit as st
 import sla
 from ui.components import limpar_filtros, rotulo, cor_sla, ICONE_SLA, ICONE_URGENCIA, exibir_status_chamado
@@ -7,6 +8,63 @@ from ui.components import limpar_filtros, rotulo, cor_sla, ICONE_SLA, ICONE_URGE
 CHAVES_FILTROS_FILA = ("busca_chamado_ativa", "filtro_status_ativa", "filtro_urgencia_ativa",
                       "filtro_categoria_ativa", "filtro_departamento_ativa", "filtro_analista_ativa",
                       "filtro_sla_ativa", "somente_meus_ativa", "pagina_fila_ativa")
+
+
+def fechar_detalhe_historico():
+    st.session_state.chamado_selecionado_historico = None
+
+
+def reiniciar_consulta_historico():
+    st.session_state.pagina_historico = 1
+    fechar_detalhe_historico()
+
+
+def _ir_para_pagina_historico(pagina):
+    st.session_state.pagina_historico = pagina
+    fechar_detalhe_historico()
+
+
+def paginar_historico(registros, tamanho=5):
+    """Renderiza o rodapé e retorna a página atual da consulta completa."""
+    paginas = max(1, ceil(len(registros) / tamanho))
+    pagina = min(max(1, st.session_state.get("pagina_historico", 1)), paginas)
+    if st.session_state.get("pagina_historico") != pagina:
+        st.session_state.pagina_historico = pagina
+    inicio = (pagina - 1) * tamanho
+    st.caption(f"Mostrando {inicio + 1 if registros else 0}–{min(inicio + tamanho, len(registros))} "
+               f"de {len(registros)} chamados · Página {pagina} de {paginas}")
+    anterior, seletor, proxima = st.columns([1, 1, 1], vertical_alignment="bottom")
+    anterior.button("Anterior", key="historico_pagina_anterior", disabled=pagina == 1,
+                    on_click=_ir_para_pagina_historico, args=(pagina - 1,), width="stretch")
+    seletor.number_input("Página", min_value=1, max_value=paginas, step=1,
+                         key="pagina_historico", disabled=paginas == 1,
+                         on_change=fechar_detalhe_historico)
+    proxima.button("Próxima", key="historico_pagina_proxima", disabled=pagina == paginas,
+                   on_click=_ir_para_pagina_historico, args=(pagina + 1,), width="stretch")
+    return registros[inicio:inicio + tamanho]
+
+
+def cartao_historico_compacto(chamado, selecionado):
+    """Resumo do registro fechado; descrição, SLA e conversa ficam no detalhe."""
+    titulo = " ".join((chamado.get("titulo") or "Sem título").split())
+    resumo = titulo if len(titulo) <= 85 else titulo[:82].rstrip() + "…"
+    criado = chamado.get("criado_em")
+    resolvido = chamado.get("resolvido_em")
+    abertura = criado.strftime("%d/%m/%Y") if criado else "—"
+    resolucao = resolvido.strftime("%d/%m/%Y") if resolvido else "—"
+    with st.container(border=True, gap="small"):
+        texto, acao = st.columns([5, 1.4], vertical_alignment="center")
+        with texto:
+            st.markdown(f"**#{chamado['id']} · {resumo}**")
+            st.caption(f"Aberto por: {chamado.get('nome_usuario') or 'Não informado'} · "
+                       f"Responsável: {chamado.get('nome_analista') or 'Sem atribuição'}")
+            st.caption(f"{chamado.get('categoria') or 'Não informada'} · "
+                       f"Urgência: {rotulo(chamado.get('urgencia')) or 'Não informada'} · "
+                       f"Abertura: {abertura} · Resolução: {resolucao}")
+        return acao.button("Selecionado" if selecionado else "Ver detalhes",
+                           key=f"hist_{chamado['id']}", disabled=selecionado,
+                           type="primary" if selecionado else "secondary", width="stretch",
+                           help=f"Consultar o registro completo de #{chamado['id']} · {titulo}")
 
 
 def filtros_fila(chamados):
