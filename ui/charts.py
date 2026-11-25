@@ -2,6 +2,7 @@
 
 import pandas as pd
 import streamlit as st
+from ui.report_scope import ESCOPO_BACKLOG, ESCOPO_TODOS, ESCOPO_CANCELADOS, rotulo_escopo
 
 SITUACOES_CHAMADOS = ("Ativos", "Cancelados", "Fechados")
 
@@ -35,14 +36,16 @@ def resumir_evolucao_por_situacao(chamados):
     return dados.reindex(pd.date_range(dados.index.min(), dados.index.max()), fill_value=0).rename_axis("Data").reset_index()
 
 
-def exibir_grafico_situacao(dados, dimensao, titulo=None, horizontal=True):
+def exibir_grafico_situacao(dados, dimensao, titulo=None, horizontal=True, escopo=ESCOPO_TODOS):
     if titulo:
         st.markdown(f"##### {titulo}")
+    rotulo_escopo(escopo)
     if dados.empty:
         st.info("Nenhum chamado neste recorte para exibir no gráfico.")
         return
-    # A ordem explícita mantém a legenda e as cores nativas iguais em todos os gráficos.
-    st.bar_chart(dados, x=dimensao, y=list(SITUACOES_CHAMADOS),
+    series = (["Ativos"] if escopo == ESCOPO_BACKLOG else ["Cancelados"]
+              if escopo == ESCOPO_CANCELADOS else list(SITUACOES_CHAMADOS))
+    st.bar_chart(dados, x=dimensao, y=series,
                  horizontal=horizontal, stack=True, sort=False,
-                 x_label="Chamados" if horizontal else "Data de abertura",
-                 y_label=dimensao if horizontal else "Chamados")
+                 x_label=dimensao if horizontal else "Data de abertura",
+                 y_label="Chamados")

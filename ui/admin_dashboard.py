@@ -6,14 +6,18 @@ import json
 import pandas as pd
 import streamlit as st
 import sla
-from ui.components import indicadores, exibir_tabela_tematica, limpar_filtros, rotulo
+from ui.components import indicadores, limpar_filtros, rotulo
 from ui.charts import resumir_por_situacao, resumir_evolucao_por_situacao, exibir_grafico_situacao
+from ui.report_scope import (
+    ESCOPO_BACKLOG, ESCOPO_TODOS, ESTADOS_BACKLOG,
+    filtrar_escopo, rotulo_escopo, tabela_relatorio,
+)
 
 ENCERRADOS = {"Fechado", "Cancelado"}
 PERIODOS_ABERTURA = {"Último mês": 30, "Última semana": 7, "Último dia": 1}
 CHAVES_FILTROS_DASHBOARD = (
     "dashboard_periodo_abertura", "dashboard_intervalo_datas", "dashboard_data_especifica", "dashboard_categoria",
-    "dashboard_urgencia", "dashboard_situacao",
+    "dashboard_urgencia", "dashboard_situacao", "dashboard_escopo",
 )
 
 
@@ -32,9 +36,9 @@ def intervalo_abertura(periodo, agora, datas=None):
 
 
 def filtrar_chamados_dashboard(chamados, inicio, fim, categoria="Todas",
-                              urgencia="Todas", situacao="Todas"):
+                              urgencia="Todas", situacao="Todas", escopo=ESCOPO_TODOS):
     # listar_chamados já entrega os datetimes na hora civil de São Paulo.
-    return [c for c in chamados
+    return [c for c in filtrar_escopo(chamados, escopo)
             if c.get("criado_em") and (inicio is None or inicio <= c["criado_em"]) and c["criado_em"] <= fim
             and (categoria == "Todas" or (c.get("categoria") or "Outros") == categoria)
             and (urgencia == "Todas" or (c.get("urgencia") or "Não informada") == urgencia)
@@ -50,12 +54,16 @@ def filtros_dashboard(chamados):
         if data_anterior is not None and "dashboard_intervalo_datas" not in st.session_state:
             datas_padrao = (data_anterior, data_anterior)
     with st.container(border=True):
+        escopo = st.radio("Escopo da análise", [ESCOPO_BACKLOG, ESCOPO_TODOS],
+                           horizontal=True, key="dashboard_escopo",
+                           help="Backlog: novos, em andamento, em espera e resolvidos aguardando confirmação, abertos nas datas selecionadas. "
+                                "Tudo: inclui também fechados e cancelados, respeitando os filtros.")
         periodo_col, data_col = st.columns(2)
         periodo = periodo_col.selectbox(
             "Período de abertura", [*PERIODOS_ABERTURA, "Intervalo de datas", "Até agora"],
             key="dashboard_periodo_abertura",
             help="Último mês: 30 dias; última semana: 7 dias; último dia: 24 horas. "
-                 "Até agora: todo o histórico até o momento atual. Os demais filtros continuam aplicados.",
+                 "Até agora: sem data inicial, até o momento atual, respeitando o escopo e os demais filtros.",
         )
         datas = None
         if periodo == "Intervalo de datas":
@@ -74,8 +82,11 @@ def filtros_dashboard(chamados):
             "Urgência", ["Todas", "Critica", "Alta", "Media", "Baixa", "Não informada"],
             format_func=rotulo, key="dashboard_urgencia",
         )
+        estados = ["Todas", *ESTADOS_BACKLOG] + (["Fechado", "Cancelado"] if escopo == ESCOPO_TODOS else [])
+        if st.session_state.get("dashboard_situacao", "Todas") not in estados:
+            st.session_state.dashboard_situacao = "Todas"
         situacao = situacao_col.selectbox(
-            "Situação", ["Todas", "Novo", "Em Andamento", "Em Espera", "Resolvido", "Fechado", "Cancelado"],
+            "Situação", estados,
             key="dashboard_situacao",
         )
         st.button("Limpar filtros", key="limpar_filtros_dashboard", on_click=limpar_filtros,
@@ -86,15 +97,17 @@ def filtros_dashboard(chamados):
     except ValueError as erro:
         st.info(str(erro))
         return None
-    filtrados = filtrar_chamados_dashboard(chamados, inicio, fim, categoria, urgencia, situacao)
+    filtrados = filtrar_chamados_dashboard(chamados, inicio, fim, categoria, urgencia, situacao, escopo)
     if periodo == "Até agora":
-        janela = f"Todo o histórico até {fim:%d/%m/%Y %H:%M}"
+        janela = f"Sem data inicial · Aberturas até {fim:%d/%m/%Y %H:%M}"
     elif periodo == "Intervalo de datas":
         janela = f"{datas[0]:%d/%m/%Y} a {datas[1]:%d/%m/%Y} · Dias completos"
     else:
         janela = f"{inicio:%d/%m/%Y %H:%M} a {fim:%d/%m/%Y %H:%M}"
     st.caption(f"{janela} (São Paulo) · Categoria: {categoria} · Urgência: {rotulo(urgencia)} · "
                f"Situação: {situacao} · {len(filtrados)} chamado(s)")
+    rotulo_escopo(escopo, "Somente pendentes abertos nas datas selecionadas; resolvidos aguardam confirmação."
+                  if escopo == ESCOPO_BACKLOG else "Ativos, fechados e cancelados abertos nas datas selecionadas, com os filtros atuais.")
     return filtrados
 
 
@@ -156,8 +169,10 @@ def resumir_carga_departamentos(chamados):
     return resumir_por_situacao(chamados, "Departamento", departamento_relatorio).to_dict("records")
 
 
-def renderizar_dashboard(chamados):
+def renderizar_dashboard(chamados, escopo=ESCOPO_TODOS):
+    chamados = filtrar_escopo(chamados, escopo)
     st.subheader("Visão executiva")
+    rotulo_escopo(escopo, "Indicadores e gráficos abaixo usam os filtros selecionados.")
     st.caption("Recorte por data de abertura e escopo selecionados acima. "
                "Os estados e SLAs refletem a situação atual desses chamados, em America/Sao_Paulo.")
     resumo = resumir_operacao(chamados)
@@ -174,30 +189,29 @@ def renderizar_dashboard(chamados):
 
     st.markdown("#### Demanda e gargalos")
     with st.container(border=True):
-        exibir_grafico_situacao(resumir_evolucao_por_situacao(chamados), "Data", "Evolução da demanda", horizontal=False)
-        st.caption("Chamados por dia de abertura no recorte, separados pela situação atual: ativos, cancelados e fechados. "
+        exibir_grafico_situacao(resumir_evolucao_por_situacao(chamados), "Data", "Evolução da demanda", horizontal=False, escopo=escopo)
+        st.caption("Situação atual dos chamados do escopo escolhido, agrupados por dia de abertura. "
                    "Inclui dias sem abertura entre os registros. Apoia o planejamento de cobertura.")
 
     with st.container(border=True):
         carga = resumir_por_situacao(chamados, "Departamento", departamento_relatorio)
-        exibir_grafico_situacao(carga, "Departamento", "Carga por departamento")
-        st.caption("Total de chamados abertos no período e nos filtros selecionados, por departamento do solicitante. "
-                   "Cada barra soma ativos, cancelados e fechados. Ativos incluem novos, em andamento, em espera e resolvidos. "
+        exibir_grafico_situacao(carga, "Departamento", "Carga por departamento", escopo=escopo)
+        st.caption("Chamados do escopo selecionado por departamento do solicitante. "
+                   "Backlog mostra somente pendentes; Tudo inclui o histórico finalizado. "
                    "Compare o volume de solicitações de cada setor e a parcela que ainda está na fila.")
 
     with st.container(border=True):
         valores = resumir_por_situacao(chamados, "Urgência", lambda c: rotulo(c.get("urgencia")) or "Não informada")
-        exibir_grafico_situacao(valores, "Urgência", "Distribuição de urgências")
-        st.caption("Todos os chamados do recorte por urgência, separados em ativos, cancelados e fechados. Compare o volume de cada nível.")
+        exibir_grafico_situacao(valores, "Urgência", "Distribuição de urgências", escopo=escopo)
+        st.caption("Urgências do escopo selecionado. Compare a concentração de prioridades em cada nível.")
 
     with st.container(border=True):
-        st.markdown("##### Primeira resposta e resolução")
         linhas = [{"Etapa": nome, "Situação": e[chave]["status"]}
                   for c, e in resumo["avaliados"] if c.get("status") != "Cancelado"
                   for chave, nome in (("resposta", "Primeira resposta"), ("resolucao", "Resolução"))]
         if linhas:
             tabela = pd.crosstab(pd.DataFrame(linhas)["Etapa"], pd.DataFrame(linhas)["Situação"])
-            exibir_tabela_tematica(tabela.reset_index())
+            tabela_relatorio(tabela.reset_index(), "Primeira resposta e resolução", escopo, "Cancelados excluídos; situação atual de cada etapa.")
         st.caption("Contagem por etapa conforme as metas configuradas no mesmo recorte, sem cancelados. "
                    "Estados em andamento não equivalem a metas cumpridas; compare as duas etapas para localizar atrasos.")
 
@@ -212,7 +226,8 @@ def renderizar_dashboard(chamados):
                        "Resposta": e["resposta"]["status"], "Prazo de resposta": sla.formatar_data(e["resposta"]["prazo_efetivo"]),
                        "Resolução": e["resolucao"]["status"], "Prazo de resolução": sla.formatar_data(e["resolucao"]["prazo_efetivo"])})
     if linhas:
-        exibir_tabela_tematica(pd.DataFrame(linhas))
+        tabela_relatorio(pd.DataFrame(linhas), "Exceções que precisam de ação", ESCOPO_BACKLOG,
+                          "Somente pendentes do recorte com risco, violação ou urgência alta/crítica.")
     else:
         st.success("Nenhuma exceção de SLA ou urgência alta/crítica entre os ativos deste recorte.")
     return resumo

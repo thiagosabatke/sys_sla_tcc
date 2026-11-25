@@ -1,0 +1,57 @@
+Ferramenta: ImageGen integrada.
+Referência: imagem original fornecida pelo usuário.
+Objetivo: preservar o formato original, com perfis à esquerda, aplicação no centro e fluxo vertical à direita.
+
+PROMPT PRINCIPAL
+Edit the attached diagram. The user specifically wants THIS ORIGINAL FORMAT, not a redesign. Preserve its layout, restrained colors, straight rectangular boxes, thin gray orthogonal arrow connectors, single thin BLUE rectangular system boundary in the center, and plain white background. Preserve three BLUE actor boxes outside the system on the LEFT, small pale-pink Python/Streamlit and MySQL boxes at the TOP, a single light PURPLE main function box INSIDE the blue system boundary, one pale-YELLOW AI/RAG box BELOW the purple box inside the system, and a VERTICAL column of pale-GREEN workflow boxes outside the system on the RIGHT. Keep the title above the central boundary: "SISTEMA DE CHAMADOS". No icons, no gradients, no shadows, no rounded rectangles, no large bold infographic cards, no separate horizontal workflow section, no decorative elements. It should look like the same simple academic block diagram, professionally cleaned up, with sharp readable text. Widen and increase resolution as necessary, preferably a wide presentation landscape canvas around 1600x900, with room for the right workflow column. Typography consistent, plain sans-serif. Preserve the original spatial structure and the connections from each actor to the purple system box. Keep all arrows outside the text.
+
+Apply these content corrections:
+LEFT three actor boxes, exactly:
+"Solicitante" / "Abre e acompanha"
+"Analista de TI" / "Atende e resolve"
+"Administrador" / "Acessos, SLA e indicadores"
+
+TOP left pink box:
+"Aplicação web" / "Python + Streamlit"
+TOP right pink box:
+"Banco de dados" / "MySQL"
+Connect Python/Streamlit to the central application function box. Connect MySQL and that central function box with a bidirectional gray connector for reading and writing.
+
+CENTRAL purple box:
+"Gestão de chamados"
+"Abertura, atendimento, acompanhamento e histórico"
+"Acessos, SLA e indicadores"
+
+YELLOW box below inside the blue boundary:
+"IA local + RAG"
+"Orientação, triagem e classificação"
+"Base de conhecimento autorizada"
+Connect the AI box with the purple box, as a supporting system component. Do not imply automatic training on all tickets.
+
+RIGHT GREEN column: replace the original four workflow boxes with SIX compact green rectangular boxes aligned vertically, maintaining that same right-side vertical format. Each is connected DOWNWARD to the next, in exactly this order and text:
+1) "Abertura" / "Confirmação do chamado"
+2) "Atendimento" / "Diagnóstico e solução"
+3) "Resolvido" / "Aguarda confirmação"
+4) "Validação" / "Aceita ou solicita revisão"
+5) "Fechado" / "Encerramento do chamado"
+6) "Avaliação" / "Satisfação do solicitante"
+
+Continue the original connector from the central purple box to the FIRST green workflow box. Label the downward arrow between Validação and Fechado with "Aceitar". Add a neat return connector from the RIGHT edge of Validação, routed to the RIGHT of the column, upward and into the RIGHT edge of Atendimento, labeled "Solicitar revisão". This return must NOT point to Fechado. Ensure the logical flow is Resolvido → Validação → Fechado → Avaliação; confirmation/revision is before final closure, while satisfaction is after closure. All boxes and return arrow must fit with adequate margins. The workflow is a vertical column only, like the reference.
+
+At the bottom in small plain dark text, two brief notes, unobtrusive:
+"A IA pode orientar antes da confirmação da abertura."
+"O fechamento automático segue o prazo configurado."
+
+Portuguese accents must be correct. Keep all of the reference's distinctive simple rectangular diagram format. Do not reproduce the prior generated image with the large title and horizontal cycle; use ONLY the attached original image as the visual format.
+
+AJUSTE FINAL
+Make ONE precise connector correction to this diagram, preserving ALL text, box positions, colors, rectangular original academic format, typography, and the vertical workflow. Do not redesign or reword anything.
+
+The administrator's connector currently runs into the yellow "IA local + RAG" box, which is wrong. Correct it so the LEFT "Administrador / Acessos, SLA e indicadores" box connects directly to the CENTRAL PURPLE "Gestão de chamados" box.
+
+Exact routing using approximate coordinates of this 1672x941 reference:
+Remove the existing gray horizontal line from the administrator box at x284,y589 toward the yellow box, and remove the existing dangling gray vertical segment at approximately x955 running from the blue boundary bottom y833 up to the purple box.
+Draw a single connected thin gray orthogonal arrow as follows: START at the right edge of the administrator card (about x284,y590), run right to x450,y590, run DOWN to x450,y710 (below the yellow AI box), run RIGHT to x1015,y710, run UP to x1015,y365, and END with an arrowhead pointing UP into the bottom edge of the PURPLE "Gestão de chamados" box. The entire connector must be visible, uninterrupted, and must not touch or pass behind the yellow AI box. This is a dedicated administrator-to-management connection.
+Retain the separate purple-to-yellow IA connector already present.
+Keep the other actor arrows, Python/Streamlit connection, bidirectional MySQL connection, all six green workflow boxes, downward acceptance arrows, revision return loop, blue boundary, and footer notes intact. Nothing else changes.
+

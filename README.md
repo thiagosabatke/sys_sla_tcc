@@ -42,6 +42,14 @@ gravação de chamado, migrações aplicadas e avisos. Para diagnóstico detalha
 PowerShell, use `$env:LOG_LEVEL="DEBUG"; python main.py`; o nível padrão é `INFO`.
 Respostas brutas da IA e senhas não são enviadas ao terminal.
 
+Na conversa, o painel da IA informa a etapa atual, o tempo de espera e quando
+fragmentos da resposta estão sendo recebidos. Após 30 segundos sem atualização,
+avisa sobre a demora. A espera total é limitada a três minutos; falhas de conexão,
+indisponibilidade e interrupções da resposta mostram uma orientação e o botão
+**Tentar novamente**, preservando a mensagem e o histórico. Cada conexão tem
+limite de 5 segundos e cada espera por novos dados, de 60 segundos. Nenhum chamado
+é aberto por uma falha ou pelo botão de tentar novamente.
+
 ### Auditoria e privacidade
 
 Na primeira execução, o sistema cria a tabela `auditoria`, que registra eventos de
@@ -74,21 +82,27 @@ multimodais opcionais do `transformers`, que não são usadas neste sistema.
 
 Nos dashboards, o período de abertura oferece **Último mês** (30 dias), **Última
 semana** (7 dias), **Último dia** (24 horas), **Intervalo de datas** (da data inicial
-à final, incluindo os dois dias completos) e **Até agora** (todo o histórico até
-o momento atual), no horário de São Paulo. A consulta carrega todas as páginas de
+à final, incluindo os dois dias completos) e **Até agora** (sem data inicial,
+até o momento atual), no horário de São Paulo. A consulta carrega todas as páginas de
 chamados, sem o corte anterior de 5.000 registros. Categoria, urgência e situação podem ser combinadas nos
-filtros visíveis; **Limpar filtros** restaura o último mês com todas as opções.
+filtros visíveis; **Limpar filtros** restaura o último mês e o escopo de backlog.
 O mesmo recorte alimenta Executivo, Visão geral e Operação e SLA. Pessoas considera
 o cadastro atual; IA e conhecimento identifica o escopo de suas próprias métricas.
-Em **Carga por departamento**, cada barra soma todos os chamados do recorte e
-separa ativos, fechados e cancelados. Assim, o histórico de atendimento participa
-do volume do setor, e a parcela ativa continua identificada.
-Os gráficos de chamados seguem a legenda **Ativos → Cancelados → Fechados**,
-com barras empilhadas por data de abertura, urgência, equipe, departamento,
-categoria, analista e confiança da classificação. Cada chamado entra uma vez.
-Os recortes específicos, como fila pendente e motivos de cancelamento, continuam
-respeitando seu escopo; as séries sem registros aparecem zeradas. Resolvidos
-aguardando confirmação permanecem em Ativos.
+Os dashboards abrem em **Backlog do período**: somente novos, em andamento, em
+espera e resolvidos aguardando confirmação, abertos nas datas escolhidas. Use essa
+visão para distribuir trabalho e agir sobre riscos e violações. Gráficos e tabelas
+não mostram colunas de finalizados; a carga por analista destaca pendências,
+violações, risco e confirmações aguardadas.
+
+Selecione **Tudo no período** para analisar volume histórico e produtividade,
+incluindo fechados e cancelados, com a legenda **Ativos → Cancelados → Fechados**.
+Cada tabela e gráfico identifica o escopo, inclusive os recortes exclusivos de
+backlog ou cancelamentos. Para todo o histórico, combine **Tudo no período** com
+**Até agora**. Listas detalhadas e matrizes ficam recolhidas em consultas opcionais.
+Fechados com SLA violado não entram nas prioridades imediatas da operação.
+Cadastros de pessoas e bases globais da IA têm identificação própria; a visão
+Pessoas não apresenta filtros de chamados. O Atendimento continua com fila ativa,
+histórico de fechados e cancelados em áreas separadas.
 
 No Atendimento, **Histórico (fechados)** apresenta cards compactos e busca por
 número, título ou solicitante. Use **Anterior**, **Próxima** ou o número da página

@@ -346,7 +346,7 @@ class TelasStreamlit(unittest.TestCase):
         self.assertEqual(relatorio.call_args.args[0][-1]["id"], 5001)
         self.assertEqual(consulta.call_count, 2)
         consulta.assert_called_with(limite=5000, executor_id=10, para_relatorio=True, pagina=1)
-        self.assertTrue(any("Todo o histórico até" in legenda.value for legenda in at.caption))
+        self.assertTrue(any("Sem data inicial" in legenda.value for legenda in at.caption))
 
     def test_data_especifica_anterior_migra_para_intervalo_do_mesmo_dia(self):
         data = datetime.now().date() - timedelta(days=2)
@@ -367,6 +367,7 @@ class TelasStreamlit(unittest.TestCase):
         at = self.executar_tela('t.tela_admin(usuario)', registros, {"administracao.acessar", "relatorios.visualizar"})
         relatorio = self.stack.enter_context(patch.object(self.telas, "relatorio_executivo_suporte"))
         at.run()
+        at.radio(key="dashboard_escopo").set_value("Tudo no período").run()
         at.selectbox(key="dashboard_categoria").set_value("Acesso")
         at.selectbox(key="dashboard_urgencia").set_value("Alta")
         at.selectbox(key="dashboard_situacao").set_value("Novo").run()
@@ -382,7 +383,85 @@ class TelasStreamlit(unittest.TestCase):
         at.button(key="limpar_filtros_dashboard").click().run()
         self.sem_erros(at)
         self.assertEqual(at.selectbox(key="dashboard_periodo_abertura").value, "Último mês")
-        self.assertEqual(len(relatorio.call_args.args[0]), 4)
+        self.assertEqual(at.radio(key="dashboard_escopo").value, "Backlog do período")
+        self.assertEqual(len(relatorio.call_args.args[0]), 3)
+
+    def test_dashboard_abre_no_backlog_e_tudo_depende_de_selecao_explicita(self):
+        data = datetime.now() - timedelta(days=2)
+        registros = [chamado(id=i, status=estado, criado_em=data) for i, estado in enumerate(
+            ("Novo", "Em Andamento", "Em Espera", "Resolvido", "Cancelado", "Fechado"), 1)]
+        at = self.executar_tela('t.tela_admin(usuario)', registros, {"administracao.acessar", "relatorios.visualizar"})
+        relatorio = self.stack.enter_context(patch.object(self.telas, "relatorio_executivo_suporte"))
+        at.run()
+        self.sem_erros(at)
+        self.assertEqual(at.radio(key="dashboard_escopo").value, "Backlog do período")
+        self.assertEqual([c["id"] for c in relatorio.call_args.args[0]], [1, 2, 3, 4])
+        self.assertEqual(relatorio.call_args.kwargs["escopo"], "Backlog do período")
+        self.assertNotIn("Fechado", at.selectbox(key="dashboard_situacao").options)
+        at.radio(key="dashboard_escopo").set_value("Tudo no período").run()
+        self.sem_erros(at)
+        self.assertEqual(len(relatorio.call_args.args[0]), 6)
+        at.selectbox(key="dashboard_situacao").set_value("Fechado").run()
+        self.assertEqual([c["id"] for c in relatorio.call_args.args[0]], [6])
+        at.radio(key="dashboard_escopo").set_value("Backlog do período").run()
+        self.sem_erros(at)
+        self.assertEqual(at.selectbox(key="dashboard_situacao").value, "Todas")
+        self.assertEqual([c["id"] for c in relatorio.call_args.args[0]], [1, 2, 3, 4])
+
+    def test_tabelas_de_backlog_identificam_escopo_e_nao_exibem_finalizados(self):
+        from ui.report_scope import tabela_relatorio
+        registros = [chamado(id=i, status=estado, analista_id=20, nome_analista="Ana") for i, estado in enumerate(
+            ("Novo", "Em Espera", "Resolvido", "Cancelado", "Fechado"), 1)]
+        for funcao in ("relatorio_sla_desempenho", "relatorio_produtividade_equipe", "relatorio_chamados_abertos_por_departamento",
+                       "relatorio_demanda_por_departamento_categoria"):
+            with self.subTest(funcao=funcao):
+                at = self.executar_tela(f't.{funcao}(st.session_state.registros_teste, escopo="Backlog do período")', registros)
+                tabelas = self.stack.enter_context(patch.object(self.telas, "tabela_relatorio", wraps=tabela_relatorio))
+                at.run()
+                self.sem_erros(at)
+                self.assertGreater(tabelas.call_count, 0)
+                for chamada in tabelas.call_args_list:
+                    self.assertEqual(chamada.args[2], "Backlog do período")
+                    tabela = chamada.args[0]
+                    self.assertNotIn("Cancelados", tabela.columns)
+                    self.assertNotIn("Fechados", tabela.columns)
+                    if "Status atual" in tabela:
+                        self.assertEqual(set(tabela["Status atual"]), {"Novo", "Em Espera", "Resolvido"})
+                if funcao == "relatorio_sla_desempenho":
+                    consulta = next(e for e in at.expander if e.label == "Consultar chamados — Backlog do período")
+                    self.assertFalse(consulta.proto.expanded)
+                self.stack.close()
+
+    def test_prioridades_imediatas_nao_incluem_fechados_com_sla_violado(self):
+        antigo = datetime(2020, 1, 1, 10)
+        fechado = chamado(id=2, status="Fechado", urgencia="Critica", criado_em=antigo,
+                           prazo_resposta=antigo + timedelta(minutes=10), primeira_resposta_em=antigo + timedelta(hours=1),
+                           prazo_resolucao=antigo + timedelta(hours=2), resolvido_em=antigo + timedelta(hours=4))
+        ativo = chamado(id=1, urgencia="Baixa", prazo_resposta=datetime(2099, 1, 1), prazo_resolucao=datetime(2099, 1, 2))
+        at = self.executar_tela('t._relatorio_executivo_complementar(st.session_state.registros_teste, usuario)',
+                                [ativo, fechado], {"relatorios.visualizar"}).run()
+        self.sem_erros(at)
+        prioridade = next(m for m in at.metric if m.label == "Prioridade imediata")
+        self.assertEqual(prioridade.value, "0")
+        self.assertTrue(any("Situação da operação: Controlada" in info.value for info in at.info))
+
+    def test_pessoas_identifica_cadastro_e_nao_consulta_chamados(self):
+        at = self.executar_tela('t.tela_admin(usuario)', permissoes={"administracao.acessar", "relatorios.visualizar"})
+        at.session_state["dashboard_painel"] = "Pessoas"
+        at.run()
+        self.sem_erros(at)
+        self.telas.listar_chamados.assert_not_called()
+        self.assertFalse(any(r.key == "dashboard_escopo" for r in at.radio))
+        self.assertTrue(any("Escopo: Cadastros atuais" in c.value for c in at.caption))
+
+    def test_atendimento_continua_exibindo_somente_backlog_na_fila(self):
+        registros = [chamado(id=i, status=estado) for i, estado in enumerate(
+            ("Novo", "Em Andamento", "Em Espera", "Resolvido", "Cancelado", "Fechado"), 1)]
+        at = self.executar_tela('t._aba_fila_ativa_analista(usuario, st.session_state.registros_teste)',
+                                registros, {"chamados.visualizar_fila"}).run()
+        self.sem_erros(at)
+        self.assertEqual({b.key for b in at.button if b.label == "Ver detalhes"}, {"sel_1", "sel_2", "sel_3", "sel_4"})
+        self.assertFalse(any(r.key == "dashboard_escopo" for r in at.radio))
 
     def test_portal_consulta_nao_exibe_assistente_sem_permissao(self):
         at = self.executar_tela('t.tela_usuario(usuario)', [], {"chamados.visualizar_proprios"}).run()
@@ -405,6 +484,38 @@ class TelasStreamlit(unittest.TestCase):
         at.run()
         self.sem_erros(at)
         self.assertFalse(any(b.label == "Confirmar e abrir chamado" for b in at.button))
+
+    def test_falha_ia_preserva_mensagem_e_repeticao_nao_duplica_historico(self):
+        from core.ia_monitoramento import FalhaIA
+        at = self.executar_tela('t._aba_abrir_chamado(usuario)', [], {"ia.utilizar"}).run()
+        identificar = self.stack.enter_context(patch.object(self.telas, "identificar_intencao", return_value="problema"))
+        coletar = self.stack.enter_context(patch.object(self.telas, "conversar_coleta", side_effect=FalhaIA("A IA demorou demais.")))
+        salvar = self.stack.enter_context(patch.object(self.telas, "salvar_chamado"))
+        at.chat_input[0].set_value("A impressora não imprime").run()
+        self.sem_erros(at)
+        self.assertEqual(at.error[0].value, "A IA demorou demais.")
+        self.assertEqual(len(at.session_state["chat_mensagens"]), 2)
+        self.assertIsNone(at.session_state["chat_resultado_final"])
+
+        coletar.side_effect = None
+        coletar.return_value = {"acao": "perguntar", "mensagem": "Qual mensagem de erro aparece?"}
+        at.button(key="chat_tentar_novamente").click().run()
+        self.sem_erros(at)
+        self.assertEqual(len(at.error), 0)
+        self.assertEqual(len(at.session_state["chat_mensagens"]), 3)
+        self.assertEqual(sum(m["role"] == "user" for m in at.session_state["chat_mensagens"]), 1)
+        self.assertEqual(at.session_state["chat_mensagens"][-1]["content"], "Qual mensagem de erro aparece?")
+        self.assertEqual(identificar.call_count, 2)
+        salvar.assert_not_called()
+
+    def test_falha_inesperada_da_ia_nao_expoe_detalhes(self):
+        at = self.executar_tela('t._aba_abrir_chamado(usuario)', [], {"ia.utilizar"}).run()
+        self.stack.enter_context(patch.object(self.telas, "identificar_intencao", side_effect=RuntimeError("conteúdo privado")))
+        at.chat_input[0].set_value("Não consigo imprimir").run()
+        self.sem_erros(at)
+        self.assertEqual(len(at.error), 1)
+        self.assertNotIn("privado", at.error[0].value)
+        self.assertIsNone(at.session_state["chat_resultado_final"])
 
     def test_fila_preserva_filtros_ao_selecionar_chamado(self):
         c = chamado()

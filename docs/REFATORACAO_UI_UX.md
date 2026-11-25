@@ -76,15 +76,22 @@ A seleção inicial foi extraída e testada independentemente dessa decisão.
 - Dashboard: ativos, violações, risco e cumprimento do SLA; tendência diária,
   carga por departamento, urgências, situação por etapa e tabela de exceções.
   Chamados cancelados não entram nos alertas nem no cumprimento.
-- Carga por departamento considera todo o recorte em barras empilhadas de ativos,
-  fechados e cancelados. O histórico participa do volume total de cada setor;
-  os KPIs e as exceções continuam usando os ativos conforme as regras existentes.
-- Os gráficos de volume de chamados compartilham `ui/charts.py`: três séries fixas,
-  na ordem Ativos, Cancelados e Fechados, em barras empilhadas. A mesma classificação
-  vale para datas de abertura, urgências, equipes, departamentos, categorias,
-  analistas, confiança da IA e análises de priorização. Recortes específicos mantêm
-  sua seleção de registros. A evolução mostra a situação atual dos chamados de
-  cada dia de abertura, preenchendo com zero os dias intermediários sem chamados.
+- Os dashboards abrem em Backlog do período, que contém somente pendentes abertos
+  nas datas selecionadas. Tudo no período inclui também fechados e cancelados para
+  analisar volume histórico e produtividade. Cada gráfico e tabela identifica sua base.
+  Backlog usa uma única série ativa; Tudo usa Ativos, Cancelados e Fechados.
+  A classificação e os rótulos são compartilhados por `ui/charts.py` e `ui/report_scope.py`.
+- No backlog, a carga por analista prioriza violações, risco e volume pendente e
+  informa espera e confirmação. As colunas de finalizados e o tempo médio de
+  resolução aparecem apenas em Tudo. As listas detalhadas de SLA e matrizes ficam
+  recolhidas. Cancelamentos são apresentados apenas em Tudo, com base própria.
+- As prioridades imediatas e os prazos vencidos para atuação consideram somente
+  pendentes, mesmo em Tudo. Violações históricas de fechados não geram alertas de
+  ação. Pessoas usa cadastros atuais sem consultar chamados; avaliações globais e
+  referências validadas da IA são identificadas como bases independentes dos filtros.
+- A evolução mostra a situação atual dos chamados de cada dia de abertura,
+  preenchendo com zero os dias intermediários sem chamados. Até agora remove o
+  limite inicial de data, mas continua respeitando o escopo escolhido.
 - Cumprimento exige ambos os marcos e prazos: resposta e resolução cumpridas
   divididas pela amostra com essas informações. Sem amostra, o indicador informa
   isso em vez de apresentar uma porcentagem artificial.
@@ -106,6 +113,14 @@ A seleção inicial foi extraída e testada independentemente dessa decisão.
   A configuração continua permitindo os temas nativos Light e Dark.
 
 ## Validação
+
+Na revisão de escopos gerenciais, os 113 testes passaram, incluindo alternância
+entre Backlog e Tudo, ausência de finalizados nas tabelas operacionais, rótulos
+de base, prioridades sem violações históricas de fechados e isolamento do
+Atendimento. Após o ajuste dos títulos dos eixos, oito testes direcionados foram
+executados. A prévia com dados fictícios foi conferida nos temas claro e escuro:
+quatro pendentes em Backlog e 32 chamados em Tudo, com tabelas identificadas e
+consultas detalhadas recolhidas. Não houve alteração dos registros do banco.
 
 Na padronização dos gráficos, os 106 testes passaram, incluindo a renderização
 dos relatórios com as três séries, os totais sem duplicação e a evolução com dias

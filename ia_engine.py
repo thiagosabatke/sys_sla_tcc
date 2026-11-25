@@ -4,10 +4,12 @@ import logging
 import hashlib
 import re
 import ollama
+import httpx
 from dotenv import load_dotenv
 from rag import buscar_contexto
 
 from observability import configurar_logging
+from core.ia_monitoramento import FalhaIA, informar_progresso_ia
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,37 @@ _TERMOS_ALTO_RISCO = (
     "sudo", "firewall", "vpn", "chave de recuperação", "formatar", "excluir",
     "apagar", "revogar acesso", "alterar segurança",
 )
+
+
+def _chat_ia(**argumentos):
+    """Recebe fragmentos reais sem mostrar JSON parcial ou raciocínio interno."""
+    informar_progresso_ia("Aguardando a IA começar a responder…")
+    try:
+        with ollama.Client(timeout=httpx.Timeout(60.0, connect=5.0)) as cliente:
+            fluxo = cliente.chat(**argumentos, stream=True)
+            partes = []
+            concluido = False
+            try:
+                for fragmento in fluxo:
+                    mensagem = fragmento.get("message", {})
+                    texto = mensagem.get("content", "")
+                    if texto or mensagem.get("thinking"):
+                        informar_progresso_ia("A IA está elaborando a resposta…", recebendo=True)
+                    partes.append(texto)
+                    concluido = bool(fragmento.get("done"))
+                texto_resposta = "".join(partes)
+                if not concluido or not texto_resposta.strip():
+                    raise FalhaIA("A IA não concluiu a resposta. Tente novamente.")
+            finally:
+                fluxo.close()
+    except httpx.TimeoutException as erro:
+        raise FalhaIA("A IA ficou sem enviar resposta por tempo demais. Tente novamente em instantes.") from erro
+    except (ConnectionError, httpx.ConnectError) as erro:
+        raise FalhaIA("Não foi possível conectar à IA. Peça ao suporte para verificar se o serviço está em execução.") from erro
+    except ollama.ResponseError as erro:
+        raise FalhaIA("O serviço de IA está indisponível. Tente novamente em instantes ou avise o suporte.") from erro
+    informar_progresso_ia("Organizando a resposta…")
+    return {"message": {"content": texto_resposta}}
 
 
 def _montar_exemplos_few_shot(casos):
@@ -177,7 +210,7 @@ Descrição: {descricao}
 
 Classifique este chamado."""
 
-    resposta = ollama.chat(
+    resposta = _chat_ia(
         model=MODELO,
         messages=[
             {"role": "system", "content": PROMPT_SISTEMA},
@@ -329,9 +362,10 @@ def _intencao_por_fallback(mensagem):
 
 
 def identificar_intencao(mensagem):
+    informar_progresso_ia("Analisando sua mensagem…")
     if _conteudo_alto_risco(mensagem):
         return "problema"
-    resposta = ollama.chat(
+    resposta = _chat_ia(
         model=MODELO,
         messages=[
             {"role": "system", "content": PROMPT_INTENCAO},
@@ -347,12 +381,13 @@ def identificar_intencao(mensagem):
 
 
 def responder_duvida(mensagem):
+    informar_progresso_ia("Consultando as orientações disponíveis…")
     trechos = buscar_contexto(mensagem, top_k=3)
     contexto = "\n\n---\n\n".join(t["conteudo"] for t in trechos)
     if not contexto:
         contexto = "(Não há orientação específica na base de conhecimento.)"
 
-    resposta = ollama.chat(
+    resposta = _chat_ia(
         model=MODELO,
         messages=[
             {"role": "system", "content": PROMPT_RESPOSTA_DUVIDA},
@@ -385,6 +420,7 @@ def _resultado_seguro_para_risco(trechos, historico):
 
 
 def conversar_coleta(historico):
+    informar_progresso_ia("Consultando as orientações para seu problema…")
     texto_usuario_ate_agora = " ".join(m["content"] for m in historico if m["role"] == "user")
     trechos = buscar_contexto(texto_usuario_ate_agora, top_k=1) if texto_usuario_ate_agora else []
     contexto = "\n\n---\n\n".join(t["conteudo"] for t in trechos) if trechos else "(nenhum contexto específico ainda)"
@@ -395,7 +431,7 @@ def conversar_coleta(historico):
     prompt_sistema = PROMPT_COLETA_TEMPLATE.format(contexto=contexto)
     mensagens = [{"role": "system", "content": prompt_sistema}] + historico
 
-    resposta = ollama.chat(
+    resposta = _chat_ia(
         model=MODELO,
         messages=mensagens,
         format="json",

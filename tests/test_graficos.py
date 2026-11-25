@@ -11,9 +11,24 @@ from ui.charts import (
     SITUACOES_CHAMADOS, resumir_por_situacao, resumir_evolucao_por_situacao,
     exibir_grafico_situacao,
 )
+from ui.report_scope import ESCOPO_BACKLOG, ESCOPO_TODOS, filtrar_escopo
 
 
 class GraficosChamados(unittest.TestCase):
+    def test_backlog_exclui_finalizados_e_mantem_resolvidos_aguardando_confirmacao(self):
+        registros = [{"id": i, "status": estado} for i, estado in enumerate(
+            ("Novo", "Em Andamento", "Em Espera", "Resolvido", "Cancelado", "Fechado"))]
+        self.assertEqual([c["id"] for c in filtrar_escopo(registros, ESCOPO_BACKLOG)], [0, 1, 2, 3])
+        self.assertEqual(len(filtrar_escopo(registros, ESCOPO_TODOS)), 6)
+        self.assertEqual(len(registros), 6)
+
+    def test_backlog_renderiza_apenas_serie_ativa(self):
+        dados = resumir_por_situacao([{"status": "Novo"}], "Equipe", lambda _: "Suporte")
+        with patch("ui.charts.st.bar_chart") as grafico, patch("ui.report_scope.st.caption") as legenda:
+            exibir_grafico_situacao(dados, "Equipe", escopo=ESCOPO_BACKLOG)
+        self.assertEqual(grafico.call_args.kwargs["y"], ["Ativos"])
+        legenda.assert_called_with(f"**Escopo: {ESCOPO_BACKLOG}**")
+
     def test_cada_chamado_entra_uma_vez_e_resolvidos_continuam_ativos(self):
         chamados = [{"status": estado, "equipe": "Suporte"} for estado in
                     ("Novo", "Em Andamento", "Em Espera", "Resolvido", "Cancelado", "Fechado")]
@@ -44,9 +59,11 @@ class GraficosChamados(unittest.TestCase):
         dados = resumir_por_situacao([{"status": "Fechado"}], "Analista", lambda _: "Ana")
         dados["Total"] = 1
         dados["Tempo médio"] = 10
-        with patch("ui.charts.st.bar_chart") as grafico:
+        with patch("ui.charts.st.bar_chart") as grafico, patch("ui.report_scope.st.caption"):
             exibir_grafico_situacao(dados, "Analista")
         self.assertEqual(grafico.call_args.kwargs["y"], ["Ativos", "Cancelados", "Fechados"])
+        self.assertEqual(grafico.call_args.kwargs["x_label"], "Analista")
+        self.assertEqual(grafico.call_args.kwargs["y_label"], "Chamados")
         self.assertTrue(grafico.call_args.kwargs["stack"])
 
 

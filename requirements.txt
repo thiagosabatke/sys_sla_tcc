@@ -1,4 +1,5 @@
 ollama
+httpx
 mysql-connector-python
 sentence-transformers
 numpy

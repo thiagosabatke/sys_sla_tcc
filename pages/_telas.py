@@ -5,6 +5,8 @@ import pandas as pd
 import mysql.connector
 from datetime import datetime, time, timedelta
 from pathlib import Path
+from core.ia_monitoramento import FalhaIA
+from ui.ia_status import aguardar_resposta_ia
 
 from ia_engine import (
     classificar_chamado, conversar_coleta, identificar_intencao, responder_duvida, avaliar_classificador,
@@ -57,6 +59,10 @@ from ui.admin_dashboard import renderizar_dashboard, duracao_resolucao_horas, de
 from ui.charts import (
     SITUACOES_CHAMADOS, resumir_por_situacao, resumir_evolucao_por_situacao,
     exibir_grafico_situacao,
+)
+from ui.report_scope import (
+    ESCOPO_BACKLOG, ESCOPO_TODOS, ESCOPO_CANCELADOS,
+    filtrar_escopo, rotulo_escopo, tabela_relatorio,
 )
 from ui.analyst_view import (
     filtros_fila, filtrar_fila, resumo_filtros, cartao_fila_compacto,
@@ -580,6 +586,7 @@ def _aba_abrir_chamado(usuario):
             {"role": "assistant", "content": "Olá! Como posso ajudar? Você pode tirar uma dúvida ou descrever um problema."}
         ]
         st.session_state.chat_resultado_final = None
+        st.session_state.pop("chat_erro_ia", None)
 
     with st.container(border=True):
         for msg in st.session_state.chat_mensagens:
@@ -598,17 +605,39 @@ def _aba_abrir_chamado(usuario):
                             st.success("Avaliação registrada.")
 
         if st.session_state.chat_resultado_final is None:
+            tentar_novamente = False
+            aviso_erro = st.empty()
+            if st.session_state.get("chat_erro_ia"):
+                with aviso_erro.container():
+                    st.error(st.session_state.chat_erro_ia)
+                    st.caption("Sua mensagem foi preservada. Você pode tentar novamente ou enviar outra mensagem.")
+                    tentar_novamente = st.button("Tentar novamente", key="chat_tentar_novamente")
             entrada = st.chat_input("Digite sua resposta...")
             if entrada:
                 st.session_state.chat_mensagens.append({"role": "user", "content": entrada})
+                with st.chat_message("user"):
+                    st.write(entrada)
 
-                with st.spinner("A IA está processando..."):
-                    mensagens_usuario = [m for m in st.session_state.chat_mensagens if m["role"] == "user"]
-                    if len(mensagens_usuario) == 1 and identificar_intencao(entrada) == "duvida":
-                        duvida = responder_duvida(entrada)
+            if entrada or tentar_novamente:
+                aviso_erro.empty()
+                st.session_state.pop("chat_erro_ia", None)
+                historico = [dict(m) for m in st.session_state.chat_mensagens]
+
+                def processar_mensagem():
+                    mensagens_usuario = [m for m in historico if m["role"] == "user"]
+                    mensagem = mensagens_usuario[-1]["content"]
+                    if len(mensagens_usuario) == 1 and identificar_intencao(mensagem) == "duvida":
+                        duvida = responder_duvida(mensagem)
                         resultado = {"acao": "orientar", **duvida}
                     else:
-                        resultado = conversar_coleta(st.session_state.chat_mensagens)
+                        resultado = conversar_coleta(historico)
+                    return resultado
+
+                try:
+                    resultado = aguardar_resposta_ia(processar_mensagem)
+                except FalhaIA as erro:
+                    st.session_state.chat_erro_ia = str(erro)
+                    st.rerun()
 
                 if resultado["acao"] in {"orientar", "perguntar"}:
                     registro_ia = salvar_atendimento_ia(usuario["id"], resultado.get("metadados_ia")) if resultado["acao"] == "orientar" else None
@@ -1327,11 +1356,13 @@ def relatorio_usuarios(usuarios):
     with grafico:
         _exibir_grafico_barras(distribuicao, "Contas por perfil", "Perfil", "Quantidade")
     with tabela:
-        exibir_tabela_tematica(distribuicao)
+        tabela_relatorio(distribuicao, "Contas por perfil", "Cadastros atuais", "Contas cadastradas; não usa período ou escopo dos chamados.")
 
 
-def relatorio_sla_desempenho(chamados):
+def relatorio_sla_desempenho(chamados, escopo=ESCOPO_TODOS):
+    chamados = filtrar_escopo(chamados, escopo)
     st.markdown("### Prazos de atendimento (SLA)")
+    rotulo_escopo(escopo, "Indicadores técnicos excluem cancelados. Resolvidos permanecem pendentes de confirmação.")
     st.caption("Uma leitura rápida dos prazos prometidos para responder e resolver chamados. Cancelados não entram no cálculo.")
     dados = pd.DataFrame(chamados)
     if dados.empty:
@@ -1358,20 +1389,23 @@ def relatorio_sla_desempenho(chamados):
         f"{resolucao_cumprida} de {len(resolucoes_concluidas)} concluídas no prazo" if len(resolucoes_concluidas) else "Ainda não há chamados resolvidos",
     )
     c2.metric(
-        "Atenção agora", f"{atrasados + em_risco} chamado(s)",
+        "Resolução: risco ou atraso", f"{atrasados + em_risco} chamado(s)",
         f"{atrasados} atrasado(s) · {em_risco} perto do prazo",
     )
     c3.metric(
         "Em atendimento", len(ativos),
         f"{em_espera} aguardando retorno do solicitante",
+        help="Novos, em andamento e em espera. Resolvidos aguardam confirmação e permanecem no backlog, fora desta contagem técnica.",
     )
 
     if atrasados:
         st.error(f"Prioridade: há {atrasados} chamado(s) com prazo de resolução vencido.")
     elif em_risco:
         st.warning(f"Atenção: {em_risco} chamado(s) está(ão) próximo(s) do prazo de resolução.")
+    elif len(ativos):
+        st.success("Não há resolução em risco ou atrasada entre os chamados em atendimento técnico.")
     else:
-        st.success("Os chamados em atendimento estão dentro dos prazos configurados.")
+        st.info("Não há chamados em atendimento técnico neste escopo. Resolvidos aguardam confirmação do solicitante.")
 
     resumo = pd.DataFrame([
         {
@@ -1387,10 +1421,8 @@ def relatorio_sla_desempenho(chamados):
             "Atrasado": int((dados["SLA resolução"] == "Violado").sum()),
         },
     ])
-    st.markdown("#### Situação dos prazos")
-    exibir_tabela_tematica(resumo)
+    tabela_relatorio(resumo, "Situação dos prazos", escopo, "Contagem por etapa; cancelados excluídos.")
 
-    st.markdown("#### Todos os chamados e situação atual")
     def situacao_chamado(chamado):
         status = chamado.get("status")
         if status == "Cancelado":
@@ -1417,12 +1449,17 @@ def relatorio_sla_desempenho(chamados):
     visao_chamados["Ordem"] = visao_chamados["SLA de resolução"].map(
         {"Violado": 0, "Em risco": 1, "Dentro do prazo": 2, "Cumprido": 3, "Pausado": 4, "Não se aplica": 5}
     ).fillna(6)
-    visao_chamados = visao_chamados.sort_values(["Ordem", "Chamado"]).drop(columns="Ordem")
-    exibir_tabela_tematica(visao_chamados)
+    visao_chamados["Encerrado"] = visao_chamados["Status atual"].isin(STATUS_ENCERRADOS)
+    visao_chamados = visao_chamados.sort_values(["Encerrado", "Ordem", "Chamado"]).drop(columns=["Encerrado", "Ordem"])
+    with st.expander(f"Consultar chamados — {escopo}", expanded=False):
+        tabela_relatorio(visao_chamados, "Chamados e situação atual", escopo,
+                          "Pendentes aparecem primeiro, ordenados pela situação do SLA.")
 
 
-def relatorio_ia(chamados, admin):
+def relatorio_ia(chamados, admin, escopo=ESCOPO_TODOS):
+    chamados = filtrar_escopo(chamados, escopo)
     st.markdown("### Qualidade da classificação da IA")
+    rotulo_escopo("Base global da IA", "Acertos e feedbacks usam avaliações disponíveis, independentemente do período e do escopo dos chamados.")
     st.caption("As métricas de qualidade usam a amostra global disponível. A distribuição de confiança abaixo usa os chamados do recorte selecionado.")
     st.caption(
         "Taxas de acerto usam a classificação final validada por analista. A confiança textual "
@@ -1464,8 +1501,8 @@ def relatorio_ia(chamados, admin):
     dados["Confiança da classificação"] = confianca
     resultados = resumir_por_situacao(dados.to_dict("records"), "Confiança da classificação",
                                        lambda c: c["Confiança da classificação"], grupos=niveis)
-    exibir_grafico_situacao(resultados, "Confiança da classificação", "Distribuição da confiança da classificação")
-    st.caption("Chamados do recorte por confiança registrada, separados em ativos, cancelados e fechados.")
+    exibir_grafico_situacao(resultados, "Confiança da classificação", "Distribuição da confiança da classificação", escopo=escopo)
+    st.caption("Confiança registrada nos chamados do escopo e filtros selecionados.")
 
 
 def relatorio_aprendizado_por_casos(admin):
@@ -1493,12 +1530,17 @@ def relatorio_aprendizado_por_casos(admin):
     exibicao = dados[["chamado_id", "titulo", "categoria_ia", "categoria_final", "urgencia_ia", "urgencia_final", "equipe_ia", "equipe_final", "diagnostico", "solucao", "confirmado_em"]].copy()
     exibicao.columns = ["Chamado", "Título", "Categoria IA", "Categoria final", "Urgência IA", "Urgência final", "Equipe IA", "Equipe final", "Diagnóstico", "Solução", "Selecionado em"]
     exibicao["Selecionado em"] = pd.to_datetime(exibicao["Selecionado em"]).dt.strftime("%d/%m/%Y %H:%M")
-    exibir_tabela_tematica(exibicao)
+    tabela_relatorio(exibicao, "Casos validados para consulta da IA", "Conhecimento global validado",
+                      "Referências autorizadas para a IA; não é backlog nem volume de chamados do período.")
 
 
-def relatorio_produtividade_equipe(chamados):
-    st.markdown("### Relatório de produtividade da equipe")
-    st.caption("Produção por analista, baseada nos chamados atribuídos. O tempo de resolução usa o calendário de SLA de cada chamado e desconta as pausas registradas.")
+def relatorio_produtividade_equipe(chamados, escopo=ESCOPO_TODOS):
+    chamados = filtrar_escopo(chamados, escopo)
+    st.markdown("### Carga da equipe" if escopo == ESCOPO_BACKLOG else "### Relatório de produtividade da equipe")
+    rotulo_escopo(escopo, "Somente chamados atribuídos a um analista.")
+    st.caption("Pendências atribuídas por analista, com prioridade para violações e risco de SLA."
+               if escopo == ESCOPO_BACKLOG else
+               "Produção por analista. O tempo de resolução considera o calendário de SLA e desconta as pausas registradas.")
     dados = pd.DataFrame(chamados)
     if dados.empty or "analista_id" not in dados:
         st.info("Ainda não há chamados atribuídos à equipe.")
@@ -1509,6 +1551,23 @@ def relatorio_produtividade_equipe(chamados):
         st.info("Ainda não há chamados atribuídos à equipe.")
         return
     dados["Analista"] = dados["nome_analista"].fillna("Analista removido")
+    if escopo == ESCOPO_BACKLOG:
+        dados["Situação SLA"] = [sla.pior_status(sla.status_sla(c)) for c in dados.to_dict("records")]
+        carga = dados.groupby("Analista", as_index=False).agg(
+            Ativos=("id", "count"),
+            **{"Em espera": ("status", lambda valores: int((valores == "Em Espera").sum())),
+               "Aguardando confirmação": ("status", lambda valores: int((valores == "Resolvido").sum())),
+               "SLA violado": ("Situação SLA", lambda valores: int((valores == "Violado").sum())),
+               "Em risco": ("Situação SLA", lambda valores: int((valores == "Em risco").sum()))},
+        ).sort_values(["SLA violado", "Em risco", "Ativos", "Analista"], ascending=[False, False, False, True])
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Analistas com backlog", len(carga))
+        c2.metric("Pendentes atribuídos", len(dados))
+        c3.metric("Aguardando confirmação", int((dados["status"] == "Resolvido").sum()))
+        grafico = resumir_por_situacao(dados.to_dict("records"), "Analista", lambda c: c["Analista"])
+        exibir_grafico_situacao(grafico, "Analista", "Backlog por analista", escopo=escopo)
+        tabela_relatorio(carga, "Prioridades por analista", escopo, "Ordenação por violação, risco e volume pendente.")
+        return
     dados["criado_em"] = pd.to_datetime(dados["criado_em"])
     dados["resolvido_em"] = pd.to_datetime(dados["resolvido_em"])
     dados["tempo_resolucao_horas"] = [duracao_resolucao_horas(c) for c in dados.to_dict("records")]
@@ -1525,14 +1584,17 @@ def relatorio_produtividade_equipe(chamados):
     c1.metric("Analistas com demanda", len(produtividade))
     c2.metric("Chamados atribuídos", len(dados))
     c3.metric("Chamados fechados", int((dados["status"] == "Fechado").sum()))
-    exibir_grafico_situacao(produtividade, "Analista", "Chamados por analista")
+    exibir_grafico_situacao(produtividade, "Analista", "Chamados por analista", escopo=escopo)
     st.caption("Chamados atribuídos no recorte, separados em ativos, cancelados e fechados. Chamados sem atribuição não entram nesta comparação.")
     tabela = produtividade.copy()
     tabela["Tempo médio de resolução (h de atendimento)"] = tabela["Tempo médio de resolução (h de atendimento)"].map(lambda valor: f"{valor:.1f}" if pd.notna(valor) else "—")
-    exibir_tabela_tematica(tabela)
+    tabela_relatorio(tabela, "Produtividade por analista", escopo,
+                      "Tempo médio somente de resoluções registradas; chamados sem atribuição excluídos.")
 
 
-def relatorio_cancelamentos(chamados):
+def relatorio_cancelamentos(chamados, escopo=ESCOPO_TODOS):
+    if escopo == ESCOPO_BACKLOG:
+        return
     st.markdown("### Relatório de cancelamento de chamados")
     st.caption("Motivos informados no cancelamento. Chamados cancelados não são considerados nos indicadores de SLA.")
     dados = pd.DataFrame(chamados)
@@ -1562,10 +1624,9 @@ def relatorio_cancelamentos(chamados):
     grafico, tabela = st.columns([1.4, 1])
     with grafico:
         distribuicao = resumir_por_situacao(cancelados.to_dict("records"), "Motivo", lambda c: c["Motivo"])
-        exibir_grafico_situacao(distribuicao, "Motivo", "Cancelamentos por motivo")
-        st.caption("Este recorte considera somente cancelamentos; as séries Ativos e Fechados ficam zeradas.")
+        exibir_grafico_situacao(distribuicao, "Motivo", "Cancelamentos por motivo", escopo=ESCOPO_CANCELADOS)
     with tabela:
-        exibir_tabela_tematica(motivos)
+        tabela_relatorio(motivos, "Motivos dos cancelamentos", ESCOPO_CANCELADOS, "Percentuais sobre os cancelamentos do recorte.")
 
 
 def abrir_perfil_usuario_admin(usuario_id):
@@ -1840,15 +1901,17 @@ def painel_auditoria_admin(admin):
     st.download_button("Exportar os eventos exibidos (CSV)", exibicao.to_csv(index=False).encode("utf-8-sig"), "auditoria.csv", "text/csv")
 
 
-def relatorio_operacional(chamados, admin):
+def relatorio_operacional(chamados, admin, escopo=ESCOPO_TODOS):
     """Indicadores compactos, sem expor dados pessoais em exportações."""
+    chamados = filtrar_escopo(chamados, escopo)
+    rotulo_escopo(escopo, "Indicadores, gráficos e CSV usam o mesmo recorte de abertura e filtros.")
     dados = pd.DataFrame(chamados)
     if dados.empty:
         return
     ativos = dados[~dados["status"].isin(STATUS_ENCERRADOS)]
     resolvidos = dados[dados["status"].isin(["Resolvido", "Fechado"])]
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Backlog atual", len(ativos))
+    c1.metric("Backlog do período", len(ativos))
     c2.metric("Em risco ou violados", sum(sla.pior_status(sla.status_sla(c)) in {"Em risco", "Violado"} for c in ativos.to_dict("records")))
     if usuario_tem_permissao(admin["id"], "chamados.visualizar_fila"):
         reabertos = 0
@@ -1857,7 +1920,7 @@ def relatorio_operacional(chamados, admin):
         c3.metric("Reaberturas", reabertos, help="Eventos de reabertura nos chamados do recorte.")
     else:
         c3.metric("Reaberturas", "—", help="A consulta de histórico operacional exige acesso à fila.")
-    c4.metric("Resolvidos/fechados", len(resolvidos))
+    c4.metric("Aguardando confirmação" if escopo == ESCOPO_BACKLOG else "Resolvidos/fechados", len(resolvidos))
     ids_periodo = set(dados["id"].tolist())
     pesquisas = [
         pesquisa for pesquisa in listar_pesquisas_satisfacao(admin["id"])
@@ -1869,13 +1932,13 @@ def relatorio_operacional(chamados, admin):
     tendencia = resumir_evolucao_por_situacao(chamados)
     carga_coluna, tendencia_coluna = st.columns(2)
     with carga_coluna:
-        exibir_grafico_situacao(carga, "Equipe", "Chamados por equipe")
-        st.caption("Todos os chamados do recorte por equipe, separados em ativos, cancelados e fechados.")
+        exibir_grafico_situacao(carga, "Equipe", "Chamados por equipe", escopo=escopo)
     with tendencia_coluna:
-        exibir_grafico_situacao(tendencia, "Data", "Tendência de abertura no período", horizontal=False)
-        st.caption("Situação atual dos chamados por data de abertura no recorte: ativos, cancelados e fechados.")
+        exibir_grafico_situacao(tendencia, "Data", "Tendência de abertura no período", horizontal=False, escopo=escopo)
+        st.caption("Situação atual dos chamados do escopo escolhido, agrupados por data de abertura.")
     exportacao = dados[["id", "status", "categoria", "urgencia", "equipe_destino", "criado_em", "resolvido_em"]].copy()
-    st.download_button("Exportar indicadores operacionais (CSV)", exportacao.to_csv(index=False).encode("utf-8-sig"), "indicadores_operacionais.csv", "text/csv")
+    arquivo = "indicadores_backlog.csv" if escopo == ESCOPO_BACKLOG else "indicadores_todos.csv"
+    st.download_button(f"Exportar {escopo} (CSV)", exportacao.to_csv(index=False).encode("utf-8-sig"), arquivo, "text/csv")
 
 
 def _formatar_percentual(valor):
@@ -1926,16 +1989,19 @@ def _exibir_diagrama_ishikawa(sinais, efeito):
                 st.write(evidencia)
 
 
-def relatorio_executivo_suporte(chamados, admin):
-    renderizar_dashboard(chamados)
+def relatorio_executivo_suporte(chamados, admin, escopo=ESCOPO_TODOS):
+    chamados = filtrar_escopo(chamados, escopo)
+    renderizar_dashboard(chamados, escopo=escopo)
     if chamados:
         with st.expander("Análises complementares: concentração de demanda e hipóteses"):
-            _relatorio_executivo_complementar(chamados, admin)
+            _relatorio_executivo_complementar(chamados, admin, escopo=escopo)
 
 
-def _relatorio_executivo_complementar(chamados, admin):
+def _relatorio_executivo_complementar(chamados, admin, escopo=ESCOPO_TODOS):
     """Visão estratégica: Pareto, SWOT e Ishikawa sem expor dados pessoais."""
+    chamados = filtrar_escopo(chamados, escopo)
     st.markdown("### Dashboard executivo de suporte")
+    rotulo_escopo(escopo)
     st.caption(
         "Leitura gerencial baseada em dados agregados do período. Os sinais de IA usam as "
         "classificações já revisáveis no sistema; hipóteses de causa devem ser validadas pela gestão."
@@ -1950,7 +2016,7 @@ def _relatorio_executivo_complementar(chamados, admin):
     dados["Urgência"] = dados["urgencia"].fillna("Não informada").replace("", "Não informada")
     dados["SLA resolução"] = [sla.status_sla(item)["resolucao"]["status"] for item in dados.to_dict("records")]
     ativos = dados[~dados["status"].isin(STATUS_ENCERRADOS)].copy()
-    violacoes = int((dados["SLA resolução"] == "Violado").sum())
+    violacoes = int((ativos["SLA resolução"] == "Violado").sum())
     em_risco = int((ativos["SLA resolução"] == "Em risco").sum())
     criticos_ativos = int(((ativos["Urgência"] == "Critica") | (ativos["Urgência"] == "Alta")).sum())
     ids_periodo = set(dados["id"].tolist())
@@ -1967,10 +2033,7 @@ def _relatorio_executivo_complementar(chamados, admin):
     categoria_lider = dados["Categoria"].value_counts().index[0]
     percentual_categoria_lider = dados["Categoria"].value_counts().iloc[0] / len(dados) * 100
     espera = int((ativos["status"] == "Em Espera").sum())
-    prioridade_imediata = dados[
-        (dados["SLA resolução"] == "Violado") |
-        ((~dados["status"].isin(STATUS_ENCERRADOS)) & dados["Urgência"].isin(["Critica", "Alta"]))
-    ]
+    prioridade_imediata = ativos[(ativos["SLA resolução"] == "Violado") | ativos["Urgência"].isin(["Critica", "Alta"])]
 
     if violacoes or criticos_ativos:
         situacao, icone, mensagem_situacao = "Crítica", "🔴", "Existem prazos vencidos ou solicitações de alta prioridade que exigem atuação imediata."
@@ -2026,7 +2089,8 @@ def _relatorio_executivo_complementar(chamados, admin):
         elif recorte == "Fila pendente por equipe":
             base_pareto, dimensao, titulo_pareto = ativos, "Equipe", "Fila pendente por equipe"
         else:
-            base_pareto, dimensao, titulo_pareto = dados[dados["SLA resolução"] == "Violado"], "Equipe", "Prazos vencidos por equipe"
+            base_pareto, dimensao, titulo_pareto = ativos[ativos["SLA resolução"] == "Violado"], "Equipe", "Prazos vencidos por equipe"
+        escopo_pareto = escopo if recorte == "Problemas mais frequentes" else ESCOPO_BACKLOG
         if base_pareto.empty:
             st.success("Não há dados neste recorte. Isso é um bom sinal para o acompanhamento atual.")
             pareto = pd.DataFrame(columns=[dimensao, "Chamados", "% acumulado"])
@@ -2035,8 +2099,7 @@ def _relatorio_executivo_complementar(chamados, admin):
             pareto["% acumulado"] = pareto["Chamados"].cumsum() / pareto["Chamados"].sum() * 100
         if not pareto.empty:
             distribuicao = resumir_por_situacao(base_pareto.to_dict("records"), dimensao, lambda c: c[dimensao])
-            exibir_grafico_situacao(distribuicao, dimensao, titulo_pareto)
-            st.caption("Ativos, cancelados e fechados dentro do recorte escolhido para a priorização.")
+            exibir_grafico_situacao(distribuicao, dimensao, titulo_pareto, escopo=escopo_pareto)
             st.caption("A participação acumulada é apresentada na tabela ao lado; 80% é uma referência, não uma causa comprovada.")
 
 
@@ -2056,7 +2119,7 @@ def _relatorio_executivo_complementar(chamados, admin):
             st.caption("A tabela mostra a participação acumulada para apoiar a priorização.")
             pareto_exibicao = pareto.copy()
             pareto_exibicao["% acumulado"] = pareto_exibicao["% acumulado"].map(_formatar_percentual)
-            exibir_tabela_tematica(pareto_exibicao)
+            tabela_relatorio(pareto_exibicao, "Concentração para priorização", escopo_pareto, recorte)
 
     with st.expander("Diagnóstico FOFA — pontos fortes e alertas", expanded=False):
         st.caption("Resumo para decidir o que manter, corrigir, aproveitar e acompanhar.")
@@ -2099,17 +2162,18 @@ def _relatorio_executivo_complementar(chamados, admin):
             st.write(f"• {insight}")
 
 
-def relatorio_chamados_abertos_por_departamento(chamados):
+def relatorio_chamados_abertos_por_departamento(chamados, escopo=ESCOPO_TODOS):
     """Compara o volume do recorte, incluindo departamentos sem chamados."""
+    chamados = filtrar_escopo(chamados, escopo)
     st.markdown("### Chamados por departamento")
-    st.caption("Todos os chamados do recorte por departamento do solicitante, separados em ativos, cancelados e fechados.")
+    rotulo_escopo(escopo, "Distribuição por departamento do solicitante.")
     nomes = [d["nome"] for d in listar_departamentos()]
     distribuicao = resumir_por_situacao(chamados, "Departamento", _departamento_relatorio, grupos=nomes)
     distribuicao["Total"] = distribuicao[list(SITUACOES_CHAMADOS)].sum(axis=1)
     total = int(distribuicao["Total"].sum())
     sem_departamento = int(distribuicao.loc[distribuicao["Departamento"] == "Não informado", "Total"].sum())
     c1, c2, c3 = st.columns(3)
-    c1.metric("Chamados no período", total)
+    c1.metric("Pendentes no período" if escopo == ESCOPO_BACKLOG else "Chamados no período", total)
     c2.metric("Departamento com maior demanda",
               distribuicao.iloc[0]["Departamento"] if total else "—",
               f"{int(distribuicao.iloc[0]['Total'])} chamado(s)" if total else None)
@@ -2119,17 +2183,19 @@ def relatorio_chamados_abertos_por_departamento(chamados):
         return
     grafico, tabela = st.columns([1.4, 1])
     with grafico:
-        exibir_grafico_situacao(distribuicao, "Departamento", "Volume por departamento")
+        exibir_grafico_situacao(distribuicao, "Departamento", "Volume por departamento", escopo=escopo)
     with tabela:
-        exibir_tabela_tematica(distribuicao)
+        tabela = distribuicao[["Departamento", "Ativos"]].rename(columns={"Ativos": "Pendentes"}) if escopo == ESCOPO_BACKLOG else distribuicao
+        tabela_relatorio(tabela, "Resumo por departamento", escopo)
 
 
-def relatorio_demanda_por_departamento_categoria(chamados):
+def relatorio_demanda_por_departamento_categoria(chamados, escopo=ESCOPO_TODOS):
     """Evidencia volume e motivos recorrentes de abertura por departamento."""
+    chamados = filtrar_escopo(chamados, escopo)
     st.markdown("### Demanda por departamento e categoria")
+    rotulo_escopo(escopo)
     st.caption(
-        "Mostra todos os chamados criados no período selecionado, inclusive os já fechados. "
-        "Use este recorte para identificar temas que podem ser tratados com treinamento ou melhoria de processo."
+        "Compara os temas do escopo selecionado. Use Backlog para priorizar pendências e Tudo para analisar recorrência e volume histórico."
     )
 
     dados = pd.DataFrame(chamados)
@@ -2162,7 +2228,7 @@ def relatorio_demanda_por_departamento_categoria(chamados):
 
     categoria_principal = categorias.iloc[0]
     c1, c2, c3 = st.columns(3)
-    c1.metric("Chamados criados no período", len(dados))
+    c1.metric("Pendentes no período" if escopo == ESCOPO_BACKLOG else "Chamados criados no período", len(dados))
     c2.metric("Departamento com maior demanda", demanda_departamento.iloc[0]["Departamento"])
     c3.metric(
         f"Categoria mais recorrente em {departamento_selecionado}",
@@ -2175,16 +2241,17 @@ def relatorio_demanda_por_departamento_categoria(chamados):
         distribuicao = resumir_por_situacao(
             dados[dados["Departamento"] == departamento_selecionado].to_dict("records"),
             "Categoria", lambda c: c["Categoria"])
-        exibir_grafico_situacao(distribuicao, "Categoria", f"Categorias recorrentes — {departamento_selecionado}")
-        st.caption("Chamados do departamento selecionado no recorte, separados em ativos, cancelados e fechados.")
+        exibir_grafico_situacao(distribuicao, "Categoria", f"Categorias recorrentes — {departamento_selecionado}", escopo=escopo)
     with tabela:
-        exibir_tabela_tematica(demanda_departamento)
+        tabela = (demanda_departamento[["Departamento", "Ativos"]].rename(columns={"Ativos": "Pendentes"})
+                  if escopo == ESCOPO_BACKLOG else demanda_departamento)
+        tabela_relatorio(tabela, "Volume dos departamentos", escopo)
 
     matriz = pd.crosstab(dados["Departamento"], dados["Categoria"])
     matriz["Total"] = matriz.sum(axis=1)
     matriz = matriz.sort_values("Total", ascending=False).reset_index()
-    st.markdown("#### Comparativo de demanda por categoria")
-    exibir_tabela_tematica(matriz)
+    with st.expander("Consultar comparativo por categoria", expanded=False):
+        tabela_relatorio(matriz, "Comparativo de demanda por categoria", escopo)
 
 
 def painel_perfis_admin(admin):
@@ -2582,40 +2649,47 @@ def tela_admin(usuario):
         )
 
     if navegacao == "Dashboards":
-        chamados = listar_chamados(limite=5000, executor_id=usuario["id"], para_relatorio=True)
-        lote = chamados
-        pagina = 0
-        while len(lote) == 5000:
-            pagina += 1
-            lote = listar_chamados(limite=5000, executor_id=usuario["id"], para_relatorio=True, pagina=pagina)
-            chamados.extend(lote)
         st.subheader("Painel de indicadores")
-        st.caption("Chamados filtrados pela data de abertura. Indicadores operacionais usam a situação atual desse recorte.")
-        chamados = filtros_dashboard(chamados)
-        if chamados is None:
-            return
-        st.caption("O recorte de chamados vale para Executivo, Visão geral e Operação e SLA. Pessoas mostra o cadastro atual; IA e conhecimento informa seu próprio escopo.")
-
         painel = st.segmented_control("Painel", ["Executivo", "Visão geral", "Operação e SLA", "Pessoas", "IA e conhecimento"], default="Executivo", required=True, key="dashboard_painel")
+        chamados = []
+        escopo = ESCOPO_BACKLOG
+        if painel != "Pessoas":
+            chamados = listar_chamados(limite=5000, executor_id=usuario["id"], para_relatorio=True)
+            lote = chamados
+            pagina = 0
+            while len(lote) == 5000:
+                pagina += 1
+                lote = listar_chamados(limite=5000, executor_id=usuario["id"], para_relatorio=True, pagina=pagina)
+                chamados.extend(lote)
+            st.caption("O período considera a data de abertura. Os estados e os SLAs refletem a situação atual dos chamados desse recorte.")
+            chamados = filtros_dashboard(chamados)
+            if chamados is None:
+                return
+            escopo = st.session_state.get("dashboard_escopo", ESCOPO_BACKLOG)
+            st.caption("O escopo e os filtros valem para os indicadores de chamados. As avaliações globais da IA são identificadas separadamente.")
+        else:
+            rotulo_escopo("Cadastros atuais", "Esta visão de pessoas não usa filtros de chamados.")
+
         if painel == "Executivo":
-            relatorio_executivo_suporte(chamados, usuario)
+            relatorio_executivo_suporte(chamados, usuario, escopo=escopo)
         if painel == "Visão geral":
-            relatorio_operacional(chamados, usuario)
+            relatorio_operacional(chamados, usuario, escopo=escopo)
             st.divider()
-            relatorio_chamados_abertos_por_departamento(chamados)
+            relatorio_chamados_abertos_por_departamento(chamados, escopo=escopo)
             st.divider()
-            relatorio_demanda_por_departamento_categoria(chamados)
+            relatorio_demanda_por_departamento_categoria(chamados, escopo=escopo)
         if painel == "Operação e SLA":
-            relatorio_sla_desempenho(chamados)
+            relatorio_sla_desempenho(chamados, escopo=escopo)
             st.divider()
-            relatorio_produtividade_equipe(chamados)
-            st.divider()
-            relatorio_cancelamentos(chamados)
+            relatorio_produtividade_equipe(chamados, escopo=escopo)
+            if escopo == ESCOPO_TODOS:
+                st.divider()
+                relatorio_cancelamentos(chamados, escopo=escopo)
         if painel == "Pessoas":
             usuarios = listar_usuarios(limite=5000, executor_id=usuario["id"], para_relatorio=True)
             relatorio_usuarios(usuarios)
         if painel == "IA e conhecimento":
-            relatorio_ia(chamados, usuario)
+            relatorio_ia(chamados, usuario, escopo=escopo)
             with st.expander("Adicionar caso anonimizado para avaliação da IA"):
                 st.caption("Use apenas relatos reais já anonimizados e revisados. Estes casos medem a IA; não entram na base RAG.")
                 with st.form("caso_avaliacao_ia"):
@@ -2639,7 +2713,8 @@ def tela_admin(usuario):
                 c1.metric("Categoria (benchmark)", f"{avaliacao['categoria'] * 100:.1f}%")
                 c2.metric("Urgência (benchmark)", f"{avaliacao['urgencia'] * 100:.1f}%")
                 c3.metric("Equipe (benchmark)", f"{avaliacao['equipe'] * 100:.1f}%")
-                exibir_tabela_tematica(pd.DataFrame(avaliacao["resultados"]))
+                tabela_relatorio(pd.DataFrame(avaliacao["resultados"]), "Resultados da avaliação da IA", "Benchmark global da IA",
+                                  "Casos anonimizados de teste; não usa os filtros dos chamados.")
             st.divider()
             relatorio_aprendizado_por_casos(usuario)
 
